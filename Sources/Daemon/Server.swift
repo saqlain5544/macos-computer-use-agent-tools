@@ -29,6 +29,11 @@ final class Server {
 
     /// Bind, publish the port, and start accepting. Returns the port.
     /// Wire the MCP surface's operations into the log.
+    /// A filename-safe form of an agent id, for preview files.
+    private func sanitise(_ name: String) -> String {
+        String(name.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" })
+    }
+
     func start(preferredPort: UInt16) -> UInt16? {
         MCP.operationObserver = { [weak self] tool, args, report, agent in
             guard let self else { return }
@@ -281,6 +286,35 @@ final class Server {
             }
             let nodes = ((try? helper.tree(pid: t.pid, max: 800)) ?? []).filter { $0.worthShowing }
             return (200, jsonString(["ok": true, "target": t.label, "nodes": nodes.map { $0.json }]))
+
+        case ("GET", "/work"):
+            // What each agent is driving, and a thumbnail so the person can look
+            // without touching the machine's screen. This is the dashboard's
+            // work panel.
+            var apps: [[String: Any]] = []
+            for binding in shared.allBindings() {
+                guard let t = shared.effectiveTarget(for: binding.agent) else { continue }
+                let preview = "/tmp/quiet-driver/work-\(sanitise(binding.agent)).png"
+                var shot: [String: Any] = [:]
+                if t.windowId != 0, let s = try? helper.screenshot(windowId: t.windowId,
+                                                                  path: preview, native: false) {
+                    shot = ["preview": preview, "width": s.w, "height": s.h]
+                }
+                var row: [String: Any] = [
+                    "agent": binding.agent, "label": t.label, "window_id": Int(t.windowId),
+                    "staged": t.originalFrame != nil, "work_display": Int(t.workDisplay),
+                    "on_screen": t.onScreen,
+                    "bounds": ["x": t.bounds.x, "y": t.bounds.y, "w": t.bounds.w, "h": t.bounds.h],
+                ]
+                row.merge(shot) { a, _ in a }
+                apps.append(row)
+            }
+            let display: [String: Any] = WorkDisplay.shared.displayID != 0
+                ? ["id": Int(WorkDisplay.shared.displayID),
+                   "bounds": ["x": WorkDisplay.shared.bounds.minX, "y": WorkDisplay.shared.bounds.minY,
+                              "w": WorkDisplay.shared.bounds.width, "h": WorkDisplay.shared.bounds.height]]
+                : ["id": 0, "error": WorkDisplay.shared.failure ?? "not created"]
+            return (200, jsonString(["ok": true, "work_display": display, "apps": apps]))
 
         case ("GET", "/metrics"):
             return (200, jsonString(metrics.snapshot(actionsTotal: shared.actionsTotal)))

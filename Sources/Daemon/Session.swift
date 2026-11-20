@@ -78,6 +78,11 @@ final class Shared {
     /// How many distinct agents hold a binding right now.
     var bindingCount: Int { locked { _targets.count } }
 
+    /// Every binding, for the dashboard's work panel.
+    func allBindings() -> [(agent: String, target: Target)] {
+        locked { _targets.map { (agent: $0.key, target: $0.value) } }
+    }
+
     func effectiveTarget(for agent: String) -> Target? {
         let key = agent.isEmpty ? "default" : agent
         // An unnamed caller means "the app I just bound" — but only while that is

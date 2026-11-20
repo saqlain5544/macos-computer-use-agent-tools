@@ -150,6 +150,30 @@ if isBridge {
 
 // `--probe-display` answers one question: can this process create the work
 // display? It exists because the daemon and a plain test binary can differ.
+// `--probe-displays` checks the promise the work display makes: it exists, it
+// is not the person's main display, and it gives each app its own region.
+if args.contains("--probe-displays") {
+    var ok = 0, failed = 0
+    func check(_ name: String, _ cond: Bool, _ detail: String = "") {
+        print("  " + name.padding(toLength: 48, withPad: " ", startingAt: 0)
+              + (cond ? "PASS" : "FAIL") + "  " + detail)
+        if cond { ok += 1 } else { failed += 1 }
+    }
+    let mainBefore = CGMainDisplayID()
+    print("  main display before: \(mainBefore) \(CGDisplayPixelsWide(mainBefore))x\(CGDisplayPixelsHigh(mainBefore))")
+    let created = WorkDisplay.shared.ensure()
+    check("work display created", created, "\(WorkDisplay.shared.displayID)")
+    check("the person's main display is untouched", CGMainDisplayID() == mainBefore,
+          "main=\(CGMainDisplayID())")
+    let r1 = WorkDisplay.shared.region(for: "app.one")
+    let r2 = WorkDisplay.shared.region(for: "app.two")
+    check("each app gets its own region", r1 != r2, "\(r1.origin) vs \(r2.origin)")
+    check("regions are on the work display", WorkDisplay.shared.bounds.contains(r1)
+          && WorkDisplay.shared.bounds.contains(r2), "\(WorkDisplay.shared.bounds)")
+    print("  \(ok)/\(ok + failed) passed")
+    exit(failed == 0 ? 0 : 1)
+}
+
 if args.contains("--probe-display") {
     let ok = WorkDisplay.shared.ensure()
     print("work display: \(ok ? "ok" : "failed") id=\(WorkDisplay.shared.displayID) "

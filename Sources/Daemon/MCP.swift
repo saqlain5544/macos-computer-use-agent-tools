@@ -23,6 +23,10 @@ enum MCP {
     }
 
     private static func str(_ d: String) -> [String: Any] { ["type": "string", "description": d] }
+    private static func flag(_ description: String) -> [String: Any] {
+        ["type": "boolean", "description": description]
+    }
+
     private static func num(_ d: String) -> [String: Any] { ["type": "number", "description": d] }
     private static func bool(_ d: String) -> [String: Any] { ["type": "boolean", "description": d] }
     private static func obj(_ props: [String: Any], _ required: [String]) -> [String: Any] {
@@ -71,10 +75,11 @@ enum MCP {
             Spec(name: "click",
                  description: "Click a point in the bound window. Presses the control under the point when there is one, otherwise delivers a click to the app's own process. Never moves the person's pointer.",
                  schema: { obj(["x": num("x in window coordinates"), "y": num("y in window coordinates"),
-                                "agent": agent], ["x", "y"]) }),
+                                "agent": agent, "force": flag("send the event even when the window is not on the showing Space")], ["x", "y"]) }),
             Spec(name: "double_click",
                  description: "Double-click a point in the bound window.",
-                 schema: { obj(["x": num("x"), "y": num("y"), "agent": agent], ["x", "y"]) }),
+                 schema: { obj(["x": num("x"), "y": num("y"), "agent": agent,
+                                "force": flag("send the event even when the window is off the showing Space")], ["x", "y"]) }),
             Spec(name: "right_click",
                  description: "Right-click a point in the bound window.",
                  schema: { obj(["agent": agent, "x": num("x"), "y": num("y")], ["x", "y"]) }),

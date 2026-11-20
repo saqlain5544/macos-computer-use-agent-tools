@@ -79,6 +79,8 @@ struct Target: Equatable {
     var onScreen: Bool = true
     /// Where the window was before the driver staged it onto its own display.
     var originalFrame: Rect? = nil
+    /// Which work display this app is staged on, if any.
+    var workDisplay: UInt32 = 0
     /// Was the window fullscreen before staging? A fullscreen window has to be
     /// taken out of fullscreen before it can be moved, and put back afterwards.
     var wasFullscreen = false

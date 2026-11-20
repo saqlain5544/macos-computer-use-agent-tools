@@ -100,6 +100,57 @@ struct DashboardView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
+                sectionTitle("Work")
+                Text(model.workDisplay)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                if model.workApps.isEmpty {
+                    Text("nothing bound").font(.callout).foregroundStyle(.secondary)
+                }
+                ForEach(Array(model.workApps.enumerated()), id: \.offset) { _, app in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Circle().fill(app.staged ? Color.accentColor : Color.secondary)
+                                .frame(width: 6, height: 6)
+                            Text(app.label).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                            Spacer()
+                            Text(app.agent).font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let image = app.image {
+                            Image(nsImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(height: 84)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .overlay(RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+                        } else {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .frame(height: 84)
+                                .overlay(Text("no preview").font(.system(size: 10))
+                                    .foregroundStyle(.secondary))
+                        }
+                        HStack(spacing: 6) {
+                            Button(app.staged ? "Unstage" : "Stage") {
+                                model.workAction(agent: app.agent, tool: app.staged ? "unstage" : "stage")
+                            }
+                            .controlSize(.mini)
+                            Button("Release") { model.workAction(agent: app.agent, tool: "unbind") }
+                                .controlSize(.mini)
+                            Spacer()
+                        }
+                    }
+                }
+                Spacer()
+            }
+            .frame(width: 210, alignment: .leading)
+            .padding(20)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
                 sectionTitle("Latency")
                 if model.latency.isEmpty {
                     Text("no calls measured yet").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -199,6 +250,8 @@ final class DashboardModel: ObservableObject {
     @Published var log: [(tool: String, detail: String, ok: Bool)] = []
     @Published var hint = ""
     @Published var latency: [(tool: String, p50: Double, p99: Double)] = []
+    @Published var workApps: [(agent: String, label: String, staged: Bool, image: NSImage?)] = []
+    @Published var workDisplay = ""
     @Published var treeNodes = 0
     @Published var treeSample: [(role: String, label: String)] = []
 
@@ -230,6 +283,45 @@ final class DashboardModel: ObservableObject {
             self?.refresh()
         }
         RunLoop.main.add(timer!, forMode: .common)
+    }
+
+    /// Refresh the "work" panel: every bound app with a live thumbnail, so the
+    /// person can see what each agent is doing without looking at their screen.
+    /// Stage, unstage or release one app from the dashboard.
+    func workAction(agent: String, tool: String) {
+        guard let port = dashboardPort() else { return }
+        let body = "{\"tool\":\"\(tool)\",\"agent\":\"\(agent)\"}"
+        _ = HTTP.request(port: port, method: "POST", path: "/action", body: body)
+        refreshWork()
+    }
+
+    func refreshWork() {
+        guard let port = dashboardPort() else { return }
+        guard let work = HTTP.getJSON(port: port, path: "/work") else { return }
+        let display = work["work_display"] as? [String: Any] ?? [:]
+        var rows: [(String, String, Bool, NSImage?)] = []
+        for app in (work["apps"] as? [[String: Any]] ?? []) {
+            let agent = app["agent"] as? String ?? ""
+            let label = app["label"] as? String ?? ""
+            let staged = app["staged"] as? Bool ?? false
+            var image: NSImage?
+            if let p = app["preview"] as? String, let img = NSImage(contentsOfFile: p) { image = img }
+            rows.append((agent, label, staged, image))
+        }
+        workApps = rows
+        if let id = display["id"] as? Int, id != 0, let b = display["bounds"] as? [String: Any] {
+            workDisplay = "work display \(id) · \(Int((b["w"] as? Double) ?? 0))x\(Int((b["h"] as? Double) ?? 0))"
+        } else {
+            workDisplay = (display["error"] as? String) ?? "no work display"
+        }
+    }
+
+    private func dashboardPort() -> UInt16? {
+        if let port = remotePort { return port }
+        let path = (NSHomeDirectory() as NSString).appendingPathComponent(".quiet-driver/port")
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+              let first = text.split(separator: "\n").first else { return nil }
+        return UInt16(first.trimmingCharacters(in: .whitespaces))
     }
 
     func refresh() {

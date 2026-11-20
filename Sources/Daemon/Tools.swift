@@ -77,10 +77,10 @@ enum Tools {
     /// will route mouse events to it. Returns a note for the reply, or nil if
     /// staging was not possible.
     static func autoStage(_ target: inout Target, shared: Shared, helper: Helper, agent: String) -> String? {
-        guard WorkDisplay.shared.ensure(), target.windowId != 0 else { return nil }
+        guard target.windowId != 0 else { return nil }
         let size = CGSize(width: target.bounds.w, height: target.bounds.h)
-        let staged = WorkDisplay.shared.stage(windowId: target.windowId, size: size,
-                                              helper: helper, pid: target.pid)
+        let staged = WorkDisplay.shared.stage(identity: target.identity, windowId: target.windowId,
+                                              size: size, helper: helper, pid: target.pid)
         guard staged.error == nil else { return nil }
         let original = Rect(x: target.bounds.x, y: target.bounds.y, w: target.bounds.w, h: target.bounds.h)
         var fresh = shared.effectiveTarget(for: agent) ?? target
@@ -89,6 +89,8 @@ enum Tools {
         fresh.bounds = Rect(x: staged.frame.origin.x, y: staged.frame.origin.y,
                             w: staged.frame.width, h: staged.frame.height)
         fresh.onScreen = true
+        fresh.workDisplay = WorkDisplay.shared.displayID
+        WorkDisplay.shared.note(identity: target.identity, agent: agent, label: target.label)
         shared.setTarget(fresh, for: shared.bindingKey(for: agent))
         target = fresh
         return " (the window was off the showing Space, so it was staged on the driver's own display to make the click reach it; unstage puts it back)"
@@ -322,7 +324,9 @@ enum Tools {
             // who later looks at that app.
             if let t = shared.effectiveTarget(for: agent), let original = t.originalFrame {
                 _ = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid,
-                                               frame: original.cgRect, helper: helper)
+                                               frame: original.cgRect, helper: helper,
+                                               fullscreen: t.wasFullscreen)
+                WorkDisplay.shared.forget(identity: t.identity)
             }
             // Only this agent's binding goes: another agent may hold the same
             // app, and its worker must survive.
@@ -342,27 +346,40 @@ enum Tools {
             catch { return ActionReport.err("\(error)") }
             guard t.windowId != 0 else { return ActionReport.err("nothing to stage: no window") }
             if t.onScreen {
-                return ActionReport.ok("\(t.label) is already on a visible display; no staging needed")
-            }
-            guard WorkDisplay.shared.ensure() else {
-                return ActionReport.err("could not create the driver's work display (\(WorkDisplay.shared.failure ?? "unknown"))")
+                return ActionReport.ok("\(t.label) is already on the person's display, so it needs no staging. "
+                    + "A mouse action still needs the app to be active: with watching on the driver takes the "
+                    + "front for the action and puts it back; with watching off it cannot.")
             }
             let size = CGSize(width: t.bounds.w, height: t.bounds.h)
-            let staged = WorkDisplay.shared.stage(windowId: t.windowId, size: size, helper: helper, pid: t.pid)
+            let staged = WorkDisplay.shared.stage(identity: t.identity, windowId: t.windowId,
+                                                  size: size, helper: helper, pid: t.pid)
             // Verify with the window server rather than the attempt, and give it a
             // moment: a window that just moved to another display reports
             // off-screen until the display server has processed the move.
             var live: Window? = nil
             if staged.error == nil {
-                for _ in 0..<30 {
-                    live = helper.windowsList().first { $0.windowId == t.windowId }
+                for pass in 0..<2 {
+                    for _ in 0..<30 {
+                        live = helper.windowsList().first { $0.windowId == t.windowId }
+                        if live?.onScreen == true { break }
+                        usleep(50_000)
+                    }
                     if live?.onScreen == true { break }
-                    usleep(50_000)
+                    // A window that was already sitting at the work display's
+                    // coordinates before the display existed does not register as
+                    // on-screen. Nudge it so the window server re-homes it.
+                    if pass == 0 {
+                        _ = WorkDisplay.shared.stage(identity: t.identity, windowId: t.windowId,
+                                                     size: CGSize(width: t.bounds.w, height: t.bounds.h),
+                                                     helper: helper, pid: t.pid)
+                    }
                 }
                 if let live = live, !live.onScreen {
                     // Put it back rather than leaving the app somewhere odd.
                     _ = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid,
-                                                   frame: t.bounds.cgRect, helper: helper)
+                                                   frame: t.bounds.cgRect, helper: helper,
+                                                   fullscreen: t.wasFullscreen)
+                    WorkDisplay.shared.forget(identity: t.identity)
                     return ActionReport.err("could not stage \(t.label): the window moved but the window server still reports it off screen")
                 }
             }
@@ -375,7 +392,10 @@ enum Tools {
                 fresh.onScreen = true
                 shared.setTarget(fresh, for: shared.bindingKey(for: agent))
                 var r = ActionReport.ok("staged \(t.label) on the driver's work display: it is now clickable, and the person's screen is unchanged")
-                r.payload = ["display": Int(WorkDisplay.shared.displayID),
+                fresh.workDisplay = t.workDisplay != 0 ? t.workDisplay : WorkDisplay.shared.displayID
+                WorkDisplay.shared.note(identity: t.identity, agent: agent, label: t.label)
+                shared.setTarget(fresh, for: shared.bindingKey(for: agent))
+                r.payload = ["display": Int(fresh.workDisplay),
                              "frame": ["x": staged.frame.origin.x, "y": staged.frame.origin.y,
                                        "w": staged.frame.width, "h": staged.frame.height],
                              "original": fresh.originalFrame.map { ["x": $0.x, "y": $0.y, "w": $0.w, "h": $0.h] } ?? [:]]
@@ -392,9 +412,11 @@ enum Tools {
             }
             let ok = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid, frame: original.cgRect,
                                                 helper: helper, fullscreen: t.wasFullscreen)
+            WorkDisplay.shared.forget(identity: t.identity)
             var fresh = shared.effectiveTarget(for: agent) ?? t
             fresh.originalFrame = nil
             fresh.wasFullscreen = false
+            fresh.workDisplay = 0
             fresh.bounds = original
             shared.setTarget(fresh, for: shared.bindingKey(for: agent))
             return ActionReport.ok(ok
@@ -852,8 +874,12 @@ enum Tools {
             if mode == .background, !(asBool(obj["force"]) ?? false), !target.onScreen {
                 if let staged = autoStage(&target, shared: shared, helper: helper, agent: agent) {
                     stagedNote = staged
-                } else if let reason = offScreenReason(target, tool) {
-                    return ActionReport.err(reason)
+                } else if !shared.watchEnabled {
+                    // Neither a display of its own nor permission to bring the
+                    // app forward: the click genuinely cannot reach it.
+                    if let reason = offScreenReason(target, tool) {
+                        return ActionReport.err(reason)
+                    }
                 }
             }
             let how: String
