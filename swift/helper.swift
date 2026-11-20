@@ -554,6 +554,81 @@ func panelServicePids() -> [pid_t] {
         .map { $0.processIdentifier }
 }
 
+/// The file names currently listed in the panel's file list.
+func fileRowNames(_ panel: AXUIElement) -> [String] {
+    var names: [String] = []
+    func walk(_ e: AXUIElement, _ depth: Int) {
+        if depth > 26 || names.count > 200 { return }
+        if axStr(e, "AXRole") == "AXCell" {
+            var label = ""
+            func inner(_ x: AXUIElement, _ d: Int) {
+                if d > 4 || !label.isEmpty { return }
+                if axStr(x, "AXRole") == "AXStaticText" { label = axStr(x, "AXValue") }
+                if let kids = axAttr(x, "AXChildren") as? [AXUIElement] { for k in kids { inner(k, d + 1) } }
+            }
+            inner(e, 0)
+            if !label.isEmpty && !names.contains(label) { names.append(label) }
+        }
+        if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for k in kids { walk(k, depth + 1) } }
+    }
+    walk(panel, 0)
+    return names
+}
+
+/// Find the file row whose name matches, in the panel's file list.
+func fileRow(_ panel: AXUIElement, _ name: String) -> AXUIElement? {
+    var found: AXUIElement?
+    func walk(_ e: AXUIElement, _ depth: Int) {
+        if depth > 26 || found != nil { return }
+        if axStr(e, "AXRole") == "AXCell" {
+            var label = ""
+            func inner(_ x: AXUIElement, _ d: Int) {
+                if d > 4 || !label.isEmpty { return }
+                if axStr(x, "AXRole") == "AXStaticText" { label = axStr(x, "AXValue") }
+                if let kids = axAttr(x, "AXChildren") as? [AXUIElement] { for k in kids { inner(k, d + 1) } }
+            }
+            inner(e, 0)
+            if label == name {
+                // The cell carries AXOpen; the row may not.
+                if axActions(e).contains("AXOpen") { found = e; return }
+                if let pv = axAttr(e, "AXParent") {
+                    let parent = pv as! AXUIElement
+                    if axActions(parent).contains("AXOpen") { found = parent; return }
+                }
+            }
+        }
+        if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for k in kids { walk(k, depth + 1) } }
+    }
+    walk(panel, 0)
+    return found
+}
+
+/// Whether the panel's window is actually on screen. An off-screen panel
+/// ignores AXOpen entirely, so this decides which route can work.
+func panelIsOnScreen(_ title: String) -> Bool {
+    guard let list: CFArray = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) else { return false }
+    var onScreen = false
+    let count = CFArrayGetCount(list)
+    for i in 0..<count {
+        guard let ptr = CFArrayGetValueAtIndex(list, i) else { continue }
+        let dict = unsafeBitCast(ptr, to: CFDictionary.self)
+        func str(_ key: String) -> String {
+            let cf = key as CFString
+            guard let v = CFDictionaryGetValue(dict, Unmanaged.passUnretained(cf).toOpaque()) else { return "" }
+            return unsafeBitCast(v, to: CFString.self) as String
+        }
+        if str(kCGWindowName as String) == title {
+            let cf = kCGWindowIsOnscreen as CFString
+            if let v = CFDictionaryGetValue(dict, Unmanaged.passUnretained(cf).toOpaque()),
+               unsafeBitCast(v, to: CFBoolean.self) == kCFBooleanTrue {
+                onScreen = true
+                break
+            }
+        }
+    }
+    return onScreen
+}
+
 /// Is any file dialog still attached to this pid?
 func fileDialogGone(_ pid: Int) -> Bool {
     let app = appElement(Int32(pid))
@@ -647,6 +722,10 @@ func driveFileDialog(_ req: [String: Any]) -> [String: Any] {
         return [
             "ok": true,
             "dialog": axStr(panel, "AXTitle"),
+            "on_screen": panelIsOnScreen(axStr(panel, "AXTitle")),
+            "hint": panelIsOnScreen(axStr(panel, "AXTitle"))
+                ? ""
+                : "the panel is not on screen, so it cannot be committed; an off-screen AXOpen does nothing",
             "text_fields": plainFields.count,
             "search_fields": searchFields.count,
             "filename": plainFields.first(where: { axActions($0).contains("AXConfirm") && !axStr($0, "AXValue").isEmpty })
@@ -661,7 +740,7 @@ func driveFileDialog(_ req: [String: Any]) -> [String: Any] {
         }
         return ["ok": false, "error": "the dialog did not accept the path in any text field"]
 
-    case "confirm", "open", "save":
+    case "open_row", "confirm", "open", "save":
         let wanted = req["button"] as? String ?? (action == "save" ? "Save" : "Open")
         var field: AXUIElement? = nil
         if !path.isEmpty {
@@ -684,7 +763,20 @@ func driveFileDialog(_ req: [String: Any]) -> [String: Any] {
                 _ = rc
             }
         }
-        // 2. The default button.
+        // 2. AXOpen on the row of the requested file: the double-click
+        //    equivalent. This is the only route that works, because the Open
+        //    button stays disabled — writing the filename field through AX does
+        //    not run AppKit's validation, so the button never enables.
+        //
+        //    AXOpen reports `attributeUnsupported` even when it succeeds, so the
+        //    only way to know is to look afterwards.
+        if !path.isEmpty, let row = fileRow(panel, (path as NSString).lastPathComponent) {
+            _ = AXUIElementPerformAction(row, "AXOpen" as CFString)
+            usleep(900_000)
+            if fileDialogGone(pid) { return ["ok": true, "via": "AXOpen on the file row"] }
+        }
+        // 3. The default button. It is usually disabled for the reason above,
+        //    but a save panel's Save button is enabled by default.
         if let b = findButton(wanted) {
             for action in ["AXPress"] {
                 let rc = AXUIElementPerformAction(b, action as CFString).rawValue
@@ -717,7 +809,14 @@ func driveFileDialog(_ req: [String: Any]) -> [String: Any] {
         u.postToPid(pid_t(pid))
         usleep(450_000)
         if fileDialogGone(pid) { return ["ok": true, "via": "return key"] }
-        return ["ok": false, "error": "the dialog is still open after every activation route"]
+        return [
+            "ok": false,
+            "error": "the dialog is still open after every activation route",
+            "visible_files": fileRowNames(panel).prefix(40).map { $0 },
+            "hint": "an NSOpenPanel's Open button stays disabled when the filename is written through AX, "
+                + "and AXOpen on a file row only works while the panel is on screen. "
+                + "Use open_file instead: it opens the document with no panel and no focus change.",
+        ]
 
     case "cancel":
         guard let b = findButton("Cancel") else { return ["ok": false, "error": "no Cancel button"] }

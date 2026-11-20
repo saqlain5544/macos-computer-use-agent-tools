@@ -45,11 +45,33 @@ route around them, and so nobody re-investigates them.
 
 ### `NSOpenPanel` / `NSSavePanel` will not commit
 
-> **Resolved for the common case.** Use `open_file` to open a document: it
-> runs `open -g`, shows no panel, and does not move the person's focus.
-> `close_file` closes a document through its window's close button and
-> verifies it. This entry remains for the case where an app itself insists on
-> a save/open sheet.
+**Why, precisely.** Programmatically writing the filename field through
+Accessibility does **not** run AppKit's validation, so the panel's **Open
+button never enables**. `AXPress` on a disabled button reports success and does
+nothing — which is exactly the confusing behaviour that took a day to
+understand. `Cancel` is enabled, which is why cancelling the panel always
+worked while confirming it never did.
+
+The commit route that does exist is `AXOpen` on the file row's `AXCell` — the
+double-click equivalent. It reports `attributeUnsupported` even when it
+succeeds, so it must be verified by re-polling, and it only takes effect while
+the panel's window is actually **on screen** (`kCGWindowIsOnscreen`); an
+off-screen panel ignores it. A save panel is easier: its Save button is enabled
+by default, so a plain `AXPress` commits.
+
+**The conclusion that matters:** getting a panel on screen means bringing its
+app forward, which means borrowing the person's screen. There is no way to
+commit an open panel without that. So the driver's answer is to not open one.
+
+**Route around it.** Use `open_file`: it runs `open -g`, opens the document
+with no panel at all, and does not change the person's frontmost app. For the
+agent's own rebuild cycle, `quit_app` + `launch_app` does the same. For a web
+`<input type=file>`, Chrome's DevTools protocol (`DOM.setFileInputFiles`) sets
+the file with no panel, if Chrome was launched with `--remote-debugging-port`.
+
+`file_dialog` still exists for reading a panel and for cancelling one, and it
+reports `on_screen` plus the visible files so an agent can tell why it cannot
+commit.
 
 **What happens.** The panel opens (and takes focus — a file panel is a real
 window). Its filename field can be read and written. Pressing **Open**,
