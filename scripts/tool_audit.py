@@ -71,12 +71,28 @@ def skip(name: str, why: str) -> None:
 def calc_reset() -> None:
     """Put the calculator back to a clean display.
 
-    Calculator distinguishes Clear (clears the entry) from All Clear (resets the
-    display). Using the wrong one leaves the previous test's value in place, and
-    the next assertion then measures that instead of the action under test.
+    Calculator saves its state across relaunches, and distinguishes Clear
+    (clears the entry) from All Clear (resets the display). Escape clears the
+    entry; three of them reset the whole expression, which is what a test that
+    compares before/after actually needs.
     """
-    if not post("click_label", label="All Clear")["ok"]:
-        post("click_label", label="Clear")
+    for _ in range(3):
+        post("press_key", text="Escape")
+    # The keystrokes are delivered synchronously but the app processes them on
+    # its own turn: return only once the display has actually settled, or the
+    # last Escape can land after the next action and undo it.
+    stable = 0
+    for _ in range(20):
+        if calculator_display() == "0":
+            stable += 1
+            if stable >= 2:
+                return
+        else:
+            stable = 0
+        time.sleep(0.03)
+    # Fall back to the clear buttons if the keyboard route did not take.
+    post("click_label", label="All Clear")
+    post("click_label", label="Clear")
 
 
 def calculator_display() -> str:
@@ -106,8 +122,12 @@ def main() -> int:
     check("desktop state", post("get_desktop_state")["ok"])
 
     # --- binding
+    # A calculator left mid-expression by an earlier run would make every
+    # "the display changed" assertion meaningless, so start it clean.
+    post("quit_app", app="Calculator", force=True)
+    time.sleep(0.5)
     post("launch_app", app="Calculator")
-    time.sleep(1)
+    time.sleep(1.5)
     r = post("bind_app", app="Calculator", agent="audit", takeover=True)
     check("bind_app", r["ok"], r.get("error") or r["detail"][:40])
     check("bind stores identity", bool((r.get("data") or {}).get("identity")))
@@ -142,9 +162,15 @@ def main() -> int:
         calc_reset()
         before = calculator_display()
         r = post("click", x=lx, y=ly)
-        time.sleep(0.2)
-        check("click by coordinate", r["ok"] and calculator_display() != before,
-              f"{before!r} -> {calculator_display()!r}")
+        # Wait for the display to change rather than assuming a fixed delay.
+        after = before
+        for _ in range(20):
+            after = calculator_display()
+            if after != before:
+                break
+            time.sleep(0.03)
+        check("click by coordinate", r["ok"] and after != before,
+              f"{before!r} -> {after!r}")
         check("move_cursor is a no-op on the person's pointer",
               post("move_cursor", x=lx, y=ly)["ok"] and not post("move_cursor", x=lx, y=ly)["real_pointer_moved"])
         check("scroll", post("scroll", x=lx, y=ly, lines=1)["ok"])

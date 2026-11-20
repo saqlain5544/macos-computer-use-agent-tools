@@ -382,7 +382,22 @@ Every operation is one JSON line. What the log has already found:
 
 That is the loop this log exists for: measure, attribute, fix, remeasure.
 
-## 20. Watching is the person's decision
+## 20. What the log's first targets were
+
+The log ranked the tools by total time and the worker commands inside them.
+Four fixes came straight out of that table:
+
+| Call | Before | After | What it was |
+|---|---|---|---|
+| `close_file` | 654 ms | **162 ms** | two fixed sleeps (250 ms after the Window menu, 400 ms after the close button) now poll for the effect instead |
+| focused `click_label` | 1045 ms | **254 ms** | activation polled `lsappinfo` (two subprocesses) every 40 ms; it polls NSWorkspace and confirms once |
+| any tool that reads `frontmost` | ~120 ms | **~10 ms** | `lsappinfo` went through `Process.waitUntilExit()`, which polls without a run loop; it uses the `posix_spawn` helper |
+| a capture that failed | "screencapture exited 1" | "could not be captured; its window may be closing" | the retry alternates same-window and different-window attempts, then reports what actually failed |
+
+None of these would have been visible from the outside: every one of them
+succeeded, just slowly.
+
+## 21. Watching is the person's decision
 
 | Rule | How it is enforced |
 |---|---|
@@ -395,7 +410,7 @@ That is the loop this log exists for: measure, attribute, fix, remeasure.
 The tool audit and the acceptance sweep both check the refusal path, not just
 the happy one.
 
-## 21. What is *not* verified
+## 22. What is *not* verified
 
 Honesty about the edges:
 

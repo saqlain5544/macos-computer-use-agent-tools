@@ -195,6 +195,61 @@ func runTool(_ path: String, _ args: [String]) -> Int32 {
     return status >> 8
 }
 
+/// Run a tool and capture its stdout, without Foundation's `Process`.
+///
+/// `Process.waitUntilExit()` polls because this worker has no run loop, which
+/// added tens of milliseconds to every short-lived tool — and `frontmost` runs
+/// two of them per call.
+func runToolOutput(_ path: String, _ args: [String]) -> String {
+    var fds: [Int32] = [-1, -1]
+    guard Darwin.pipe(&fds) == 0 else { return "" }
+    // posix_spawn_file_actions_t has no usable Swift initialiser on Darwin;
+    // allocate it and let the C functions work on the storage.
+    let actions = UnsafeMutablePointer<posix_spawn_file_actions_t?>.allocate(capacity: 1)
+    actions.initialize(to: nil)
+    posix_spawn_file_actions_init(actions)
+    posix_spawn_file_actions_adddup2(actions, fds[1], STDOUT_FILENO)
+    posix_spawn_file_actions_addclose(actions, fds[0])
+    posix_spawn_file_actions_addclose(actions, fds[1])
+    defer {
+        posix_spawn_file_actions_destroy(actions)
+        actions.deallocate()
+    }
+
+    var argv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
+    argv.insert(strdup(path), at: 0)
+    argv.append(nil)
+    defer { for a in argv where a != nil { free(a) } }
+
+    var pid: pid_t = 0
+    let spawned = posix_spawn(&pid, path, actions, nil, argv, environ)
+    close(fds[1])
+    guard spawned == 0 else {
+        close(fds[0])
+        return ""
+    }
+    var out = Data()
+    var buf = [UInt8](repeating: 0, count: 16 * 1024)
+    while true {
+        let n = read(fds[0], &buf, buf.count)
+        if n <= 0 { break }
+        out.append(contentsOf: buf[0..<n])
+    }
+    close(fds[0])
+    var status: Int32 = 0
+    while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+    return String(decoding: out, as: UTF8.self)
+}
+
+/// The frontmost app according to NSWorkspace: cheap enough to poll.
+///
+/// It lags the window server by a few milliseconds, so it is used for polling
+/// and confirmed with `lsappinfo` when the answer matters.
+func frontmostFast() -> (pid: Int32, name: String) {
+    let app = NSWorkspace.shared.frontmostApplication
+    return (app?.processIdentifier ?? 0, app?.localizedName ?? "")
+}
+
 /// The element under a screen point, belonging to `pid`.
 ///
 /// `AXUIElementCopyElementAtPosition` is one call into the window server and
@@ -386,23 +441,16 @@ func windowsList() -> [[String: Any]] {
 var frontCache: (at: Date, value: [String: Any])? = nil
 let frontCacheTTL: TimeInterval = 0.25
 
-func frontmostInfo(force: Bool = false) -> [String: Any] {
+func frontmostInfo(force: Bool = false, fast: Bool = false) -> [String: Any] {
     if !force, let c = frontCache, Date().timeIntervalSince(c.at) < frontCacheTTL {
         return c.value
     }
+    if fast {
+        let (pid, name) = frontmostFast()
+        return ["pid": Int(pid), "name": name, "source": "nsworkspace"]
+    }
     func run(_ args: [String]) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/lsappinfo")
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        do {
-            try p.run()
-            p.waitUntilExit()
-        } catch {
-            return ""
-        }
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        runToolOutput("/usr/bin/lsappinfo", args)
     }
 
     let asn = run(["front"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1262,18 +1310,21 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         _ = app.activate(options: [.activateAllWindows])
         // Wait for the window server to actually put it in front; `open -a`
-        // returns before the transition finishes.
-        var waited = 0
-        while waited < 1500 {
-            if frontmostInfo(force: true)["pid"] as? Int == Int(pid) { break }
-            usleep(40_000)
-            waited += 40
+        // returns before the transition finishes. Poll NSWorkspace (microseconds)
+        // and confirm with lsappinfo once — polling lsappinfo meant two
+        // subprocesses every 40 ms.
+        let started = Date()
+        let deadline = started.addingTimeInterval(1.5)
+        while Date() < deadline {
+            if frontmostFast().pid == pid { break }
+            usleep(10_000)
         }
+        let front = frontmostInfo(force: true)
         return [
-            "ok": frontmostInfo(force: true)["pid"] as? Int == Int(pid),
+            "ok": front["pid"] as? Int == Int(pid),
             "open_exit": Int(p.terminationStatus),
-            "front": frontmostInfo(force: true)["name"] as? String ?? "",
-            "waited_ms": waited,
+            "front": front["name"] as? String ?? "",
+            "waited_ms": Int(Date().timeIntervalSince(started) * 1000),
         ]
 
     case "raise_window":
@@ -1678,9 +1729,18 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         // bring the target document forward through the Window menu first.
         // That is a document-level focus change inside the app, never an
         // app-level activation, so the person's frontmost app does not move.
-        if (axAttr(ax, "AXMainWindow").map { axStr($0 as! AXUIElement, "AXTitle") } ?? "") != target {
+        func mainWindowTitle() -> String {
+            (axAttr(ax, "AXMainWindow").map { axStr($0 as! AXUIElement, "AXTitle") }) ?? ""
+        }
+
+        if mainWindowTitle() != target {
             _ = pressWindowMenuItem(ax, target)
-            usleep(250_000)
+            // Poll rather than sleep: the window usually becomes key within a
+            // few tens of milliseconds, and the fixed wait was 250 ms.
+            let deadline = Date().addingTimeInterval(0.5)
+            while mainWindowTitle() != target && Date() < deadline {
+                usleep(25_000)
+            }
         }
 
         var windows: [AXUIElement] = []
@@ -1703,17 +1763,30 @@ func handle(_ req: [String: Any]) -> [String: Any] {
             return ["ok": false, "error": "the window has no close button"]
         }
         let rc = AXUIElementPerformAction(closeButton as! AXUIElement, "AXPress" as CFString).rawValue
-        usleep(400_000)
 
-        if let sheets = axAttr(w, "AXSheets") as? [AXUIElement], !sheets.isEmpty {
+        // Poll for the document to disappear, up to 500 ms. A plain close takes
+        // tens of milliseconds; the fixed 400 ms wait was most of this call's
+        // cost. The loop also notices a save sheet, which blocks the close.
+        var sawSheet = false
+        let deadline = Date().addingTimeInterval(0.5)
+        var after = documentsNow()
+        while Date() < deadline {
+            if let sheets = axAttr(w, "AXSheets") as? [AXUIElement], !sheets.isEmpty {
+                sawSheet = true
+                break
+            }
+            after = documentsNow()
+            if !after.contains(target) { break }
+            usleep(25_000)
+        }
+
+        if sawSheet, let sheets = axAttr(w, "AXSheets") as? [AXUIElement], !sheets.isEmpty {
             return [
                 "ok": false,
                 "error": "the document has unsaved changes and is asking whether to save; answer it or leave it",
                 "sheet": axStr(sheets[0], "AXTitle"),
             ]
         }
-
-        let after = documentsNow()
         if !after.contains(target) {
             return ["ok": true, "rc": Int(rc), "closed": target]
         }

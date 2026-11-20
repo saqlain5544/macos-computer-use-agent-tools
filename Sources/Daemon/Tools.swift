@@ -305,37 +305,41 @@ enum Tools {
             // cannot be captured; that ghost clears within a frame or two, so
             // re-resolve and retry rather than reporting the capture tool's
             // error, which tells an agent nothing.
-            var captured = t.windowId
-            var attempt = Result { try helper.screenshot(windowId: captured, path: path) }
-            for _ in 0..<3 {
-                if case .success = attempt { break }
-                usleep(150_000)
-                guard let fresh = Session.rebindExcluding(shared, helper, badWindowId: captured, agent) else {
-                    return ActionReport.err(noWindowReason(helper, t, "no window to capture"))
+            // A window the window server still lists but that is already closed
+            // cannot be captured. Alternate between retrying the same window (a
+            // ghost clears within a frame or two) and resolving a different one;
+            // give up with what actually failed rather than claiming there is no
+            // window, which sends an agent looking for the wrong problem.
+            var current = t.windowId
+            var lastError = ""
+            var shot: (w: Int, h: Int, bytes: Int)?
+            for attempt in 0..<4 {
+                if attempt > 0 { usleep(150_000) }
+                if attempt % 2 == 1,
+                   let fresh = Session.rebindExcluding(shared, helper, badWindowId: current, agent) {
+                    current = fresh.windowId
                 }
-                captured = fresh.windowId
-                attempt = Result { try helper.screenshot(windowId: captured, path: path) }
-            }
-            if case .failure(let why) = attempt {
-                // Every retry failed. Say what that means for the caller rather
-                // than repeating the capture tool's error, which reads like a
-                // driver bug.
-                let hasWindow = helper.windowsList().contains {
-                    $0.pid == t.pid && Session.isUsableWindow($0)
+                do {
+                    shot = try helper.screenshot(windowId: current, path: path)
+                    break
+                } catch {
+                    lastError = "\(error)"
                 }
-                return ActionReport.err(hasWindow
-                    ? "\(t.label) could not be captured (\(why)); its window may be closing — bind again or open a document"
-                    : noWindowReason(helper, t, "\(why)"))
             }
-            switch attempt {
-            case .success(let shot):
+            if let shot = shot {
                 var r = ActionReport.ok("captured \(shot.w)x\(shot.h) of \(t.label) (\(shot.bytes) bytes) to \(path)")
                 r.payload = ["path": path, "width": shot.w, "height": shot.h,
                              "bytes": shot.bytes, "window": t.label]
                 return r
-            case .failure(let e):
-                return ActionReport.err("\(e)")
             }
+            // Every retry failed. Say what that means for the caller rather than
+            // repeating the capture tool's error, which reads like a driver bug.
+            let hasWindow = helper.windowsList().contains {
+                $0.pid == t.pid && Session.isUsableWindow($0)
+            }
+            return ActionReport.err(hasWindow
+                ? "\(t.label) could not be captured (\(lastError)); its window may be closing — bind again or open a document"
+                : noWindowReason(helper, t, lastError))
 
         case "record":
             let t: Target
