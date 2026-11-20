@@ -317,25 +317,39 @@ def measure_footprint(action_count: int) -> dict:
 
 
 def compare_runs(runs: list[dict]) -> str:
+    # Only runs taken under comparable conditions: the harness refuses to
+    # measure on a locked screen, but older runs may predate that guard.
+    runs = [r for r in runs if r.get("valid", True)]
     if len(runs) < 2:
-        return "need at least two runs to compare"
+        return "need at least two valid runs to compare"
     prev, cur = runs[-2], runs[-1]
-    lines = ["metric                                  previous      current      change"]
-    lines.append("-" * 74)
+    lines = [
+        f"comparing {prev['at']} -> {cur['at']}",
+        "",
+        "metric                                  previous      current      change",
+        "-" * 74,
+    ]
 
-    def row(name, a, b, unit=""):
-        if a is None or b is None:
+    def row(name, a, b, higher_is_better=False, unit=""):
+        if a is None or b is None or a == 0:
             return
         delta = b - a
-        pct = (delta / a * 100) if a else 0.0
-        flag = ""
-        if abs(pct) >= 10:
-            flag = "  <-- " + ("slower" if delta > 0 else "faster")
+        pct = delta / a * 100
+        if abs(pct) < 10:
+            flag = ""
+        else:
+            # Direction depends on the metric: more throughput is better, more
+            # latency is worse. Saying "faster" for a drop in actions/s is the
+            # kind of thing that hides a regression.
+            improved = (delta > 0) == higher_is_better
+            flag = "  <-- " + ("better" if improved else "WORSE")
         lines.append(f"{name:<38} {a:>9.2f}{unit} {b:>11.2f}{unit} {pct:>+8.1f}%{flag}")
 
     row("daemon RSS (MB)", prev["footprint"]["daemon_rss_after_mb"], cur["footprint"]["daemon_rss_after_mb"])
-    row("throughput (actions/s)", prev["footprint"]["actions_per_s"], cur["footprint"]["actions_per_s"])
-    for label in ("click_label", "type_text", "screenshot", "accessibility_tree"):
+    row("throughput (actions/s)", prev["footprint"]["actions_per_s"], cur["footprint"]["actions_per_s"],
+        higher_is_better=True)
+    for label in ("click_label", "click (coordinate)", "type_text", "press_key",
+                  "screenshot", "accessibility_tree"):
         a = next((b["p50_ms"] for b in prev["bench"]["tool_benchmarks"] if b["label"] == label), None)
         b = next((x["p50_ms"] for x in cur["bench"]["tool_benchmarks"] if x["label"] == label), None)
         row(f"{label} p50 (ms)", a, b)
@@ -405,6 +419,7 @@ def main() -> int:
 
     doc = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "valid": not get("/status").get("screen_locked", False),
         "quick": args.quick,
         "bench": bench,
         "footprint": footprint,

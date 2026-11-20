@@ -411,5 +411,7 @@
       }
     },
     "uptime_seconds": 66
-  }
+  },
+  "valid": false,
+  "invalid_reason": "screen was locked during the run"
 }
