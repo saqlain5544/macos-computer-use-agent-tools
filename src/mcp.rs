@@ -12,7 +12,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::helper::Helper;
+use crate::worker::WorkerPool;
 use crate::session::Handle;
 use crate::server;
 
@@ -27,6 +27,16 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[
     "2024-11-05",
     "2024-10-07",
 ];
+
+/// Per-call mode. Applies to this call only; the session default is set with
+/// set_mode.
+fn mode_prop() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["background", "focused"],
+        "description": "For this call only. background (default) never disturbs the person; focused raises the target for the action and restores their app afterwards."
+    })
+}
 
 fn agent_prop() -> Value {
     json!({
@@ -123,8 +133,15 @@ fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "click",
-            description: "Click a point in the bound window. The point is resolved to the element under it and activated through Accessibility.",
-            schema: || obj(json!({ "x": n("x in window coordinates"), "y": n("y in window coordinates") }), vec!["x", "y"]),
+            description: "Click a point in the bound window. The point is resolved to the element under it and activated through Accessibility. Runs in background mode unless this call asks for focused.",
+            schema: || obj(
+                json!({
+                    "x": n("x in window coordinates"),
+                    "y": n("y in window coordinates"),
+                    "mode": mode_prop()
+                }),
+                vec!["x", "y"],
+            ),
         },
         ToolSpec {
             name: "double_click",
@@ -274,7 +291,7 @@ fn tool_specs() -> Vec<ToolSpec> {
 
 /// Handle one JSON-RPC message. Returns the response, or `None` for a
 /// notification (which by definition gets no reply).
-pub fn handle_message(message: &Value, shared: &Handle, helper: &Helper) -> Option<Value> {
+pub fn handle_message(message: &Value, shared: &Handle, pool: &WorkerPool) -> Option<Value> {
     let method = message.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = message.get("id").cloned();
     let params = message.get("params").cloned().unwrap_or(json!({}));
@@ -323,7 +340,7 @@ pub fn handle_message(message: &Value, shared: &Handle, helper: &Helper) -> Opti
         "tools/call" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call_tool(name, &args, shared, helper) {
+            match call_tool(name, &args, shared, pool) {
                 Ok(v) => Ok(v),
                 Err((code, msg)) => Err((code, msg)),
             }
@@ -351,7 +368,7 @@ fn call_tool(
     name: &str,
     args: &Value,
     shared: &Handle,
-    helper: &Helper,
+    pool: &WorkerPool,
 ) -> Result<Value, (i32, String)> {
     let known = tool_specs().iter().any(|t| t.name == name);
     if !known {
@@ -364,7 +381,13 @@ fn call_tool(
             body.insert(k.clone(), v.clone());
         }
     }
-    let report = server::execute_public(name, &body, shared, helper);
+    // A per-call "mode" argument applies to this call only, exactly as it does
+    // over HTTP; it never changes the session.
+    let call_mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .and_then(crate::session::Mode::parse);
+    let report = server::execute_public(name, &body, call_mode, shared, pool);
 
     let payload = report.payload.clone().unwrap_or(Value::Null);
     let mut text = report.detail.clone();
@@ -523,8 +546,8 @@ mod tests {
     #[test]
     fn initialize_advertises_tools() {
         let shared = empty_shared();
-        let helper = Helper::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
-        let reply = handle_message(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}), &shared, &helper).unwrap();
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let reply = handle_message(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}), &shared, &pool).unwrap();
         assert_eq!(reply["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert!(reply["result"]["capabilities"]["tools"].is_object());
         assert!(reply["result"]["instructions"].as_str().unwrap().contains("bind_app"));
@@ -533,8 +556,8 @@ mod tests {
     #[test]
     fn tools_list_has_schemas() {
         let shared = empty_shared();
-        let helper = Helper::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
-        let reply = handle_message(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), &shared, &helper).unwrap();
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let reply = handle_message(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), &shared, &pool).unwrap();
         let tools = reply["result"]["tools"].as_array().unwrap();
         assert!(tools.len() > 15);
         let click = tools.iter().find(|t| t["name"] == "click").unwrap();
@@ -545,12 +568,12 @@ mod tests {
     #[test]
     fn protocol_version_is_negotiated() {
         let shared = empty_shared();
-        let helper = Helper::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
         // A version we speak is echoed back.
         let reply = handle_message(
             &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
             &shared,
-            &helper,
+            &pool,
         )
         .unwrap();
         assert_eq!(reply["result"]["protocolVersion"], "2025-06-18");
@@ -558,7 +581,7 @@ mod tests {
         let reply = handle_message(
             &json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}),
             &shared,
-            &helper,
+            &pool,
         )
         .unwrap();
         assert_eq!(reply["result"]["protocolVersion"], PROTOCOL_VERSION);
@@ -567,27 +590,27 @@ mod tests {
     #[test]
     fn notifications_get_no_reply() {
         let shared = empty_shared();
-        let helper = Helper::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
-        let reply = handle_message(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}), &shared, &helper);
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let reply = handle_message(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}), &shared, &pool);
         assert!(reply.is_none());
     }
 
     #[test]
     fn unknown_method_is_an_error() {
         let shared = empty_shared();
-        let helper = Helper::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
-        let reply = handle_message(&json!({"jsonrpc":"2.0","id":3,"method":"nope"}), &shared, &helper).unwrap();
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let reply = handle_message(&json!({"jsonrpc":"2.0","id":3,"method":"nope"}), &shared, &pool).unwrap();
         assert_eq!(reply["error"]["code"], -32601);
     }
 
     #[test]
     fn unknown_tool_is_rejected() {
         let shared = empty_shared();
-        let helper = Helper::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
         let reply = handle_message(
             &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nope"}}),
             &shared,
-            &helper,
+            &pool,
         )
         .unwrap();
         assert_eq!(reply["error"]["code"], -32602);
@@ -596,11 +619,11 @@ mod tests {
     #[test]
     fn tool_call_without_binding_reports_the_error() {
         let shared = empty_shared();
-        let helper = Helper::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
         let reply = handle_message(
             &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"click","arguments":{"x":1,"y":2}}}),
             &shared,
-            &helper,
+            &pool,
         )
         .unwrap();
         assert_eq!(reply["result"]["isError"], true);

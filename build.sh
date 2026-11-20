@@ -27,9 +27,12 @@ cp swift/helper.swift "$APP/Contents/Resources/helper.swift"
 
 if [ "$INSTALL" = "1" ]; then
   echo "== install"
-  # Stop the running daemon so the new binary can take the port.
+  # Stop the running daemon *and its helper*. A daemon keeps its helper child
+  # alive for its whole life, so leaving one running means the next test
+  # measures the old worker while believing it is the new one.
   pkill -f "Quiet Driver.app/Contents/MacOS/agent-driver" 2>/dev/null || true
-  sleep 1
+  pkill -f "quiet-driver-helper" 2>/dev/null || true
+  sleep 1.5
   rm -rf "/Applications/$APP"
   cp -R "$APP" "/Applications/$APP"
   echo "installed /Applications/$APP"

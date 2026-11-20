@@ -109,6 +109,8 @@ pub struct Shared {
     /// When the bound window's rectangle was last refreshed (unix millis), so
     /// actions do not pay for a window enumeration every time.
     pub bounds_refreshed_at: u64,
+    /// Seconds since the daemon started, for /metrics.
+    pub started_at: u64,
 }
 
 impl Default for Shared {
@@ -133,6 +135,10 @@ impl Default for Shared {
             helper_ready: false,
             show_window: None,
             bounds_refreshed_at: 0,
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
         }
     }
 }

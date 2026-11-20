@@ -97,6 +97,12 @@ dsh plugin install ./plugin/quiet-driver-mcp
   request, and the reply tells the agent whether it disturbed anything.
 - **Report problems** — `log_friction` and `friction_log`.
 
+Everything runs as **one main process** that holds the lock and the session
+state, plus **one lean worker per bound app** (~13 MB) so two apps never queue
+behind each other. `perf/harness.py` measures latency, memory, CPU and the two
+invariants — focus never moves and the pointer never moves — and fails the run
+when one breaks.
+
 See `skills/quiet-driver/SKILL.md` for the full guide.
 
 ## The idea

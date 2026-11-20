@@ -2,6 +2,39 @@
 
 ## The shape
 
+One main process, one worker per bound app:
+
+```
+                 the person (undisturbed)
+                          |
+   +---------------------------------------------------+
+   |  agent-driver  (MAIN PROCESS — exactly one)        |
+   |    lock file, session state, bindings, ownership   |
+   |    HTTP :<port>   MCP /mcp   /metrics              |
+   +-----------------+------------------+--------------+
+                     |                  |
+          worker(Calculator)     worker(TextEdit)         <- swift helper, one per bind
+                     |                  |
+                  [Calculator]       [TextEdit]
+```
+
+The main process is the only thing that takes the single-instance lock and the
+only thing that holds session state. Talking to an app is isolated: each bound
+app gets its own worker process, so a slow call against one app cannot block
+work on another, and a wedged worker cannot take the driver down. Workers are
+created when an app is bound, reused across a relaunch (keyed by bundle id), and
+reaped when the binding is released or moved to a different app.
+
+A worker is lean on purpose: it costs ~13 MB and only loads AppKit (~40 MB) if
+it is actually asked to record video.
+
+## Why not one helper for everything
+
+Because two agents driving two different apps should not queue behind each
+other, and because the alternative — several copies of the *main* process — is
+what produced the port races and the duplicate daemons. One main process, a
+worker per bind.
+
 ```
         agent                          the person
           |                                |
@@ -106,6 +139,13 @@ for `record`.
 
 `CGWindowListCreateImage` is obsoleted on macOS 15, which is why the capture
 path shells out to `screencapture` rather than calling the API.
+
+## Failure behaviour of a worker
+
+A worker is a child process. If it dies, the main process notices on the next
+call and spawns a fresh one; the binding, the lock and the session state are
+untouched. That is the reason the split is worth having: a wedged accessibility
+connection to one app cannot take down the daemon that other agents are using.
 
 ## The dashboard is a viewer
 

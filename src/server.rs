@@ -20,6 +20,7 @@ use std::thread;
 use serde_json::{json, Map, Value};
 
 use crate::helper::{self, Helper, Point};
+use crate::worker::WorkerPool;
 use crate::session::{self, ActionReport, Handle, LogEntry, Mode};
 use crate::workspace;
 
@@ -80,7 +81,7 @@ fn withdraw_port(port: u16) {
     }
 }
 
-pub fn spawn(shared: Handle, helper: Arc<Helper>) -> Option<u16> {
+pub fn spawn(shared: Handle, pool: Arc<WorkerPool>) -> Option<u16> {
     let configured = configured_port();
     let bind_port = configured.clone().unwrap_or(0);
     let listener = TcpListener::bind(("127.0.0.1", bind_port)).ok()?;
@@ -91,14 +92,14 @@ pub fn spawn(shared: Handle, helper: Arc<Helper>) -> Option<u16> {
         let mut s = shared.lock().unwrap();
         s.port = port;
         s.port_error = configured.err().unwrap_or_default();
-        s.permissions = helper::permissions(&helper);
+        s.permissions = helper::permissions(&pool.session());
     }
 
     // Keep the published port file pointing at us: a screenshot run or a second
     // copy must not leave the agent with a dead link.
     {
         let shared = shared.clone();
-        let helper = helper.clone();
+        let pool = pool.clone();
         thread::Builder::new()
             .name("quiet-driver-portfile".to_string())
             .spawn(move || loop {
@@ -113,7 +114,7 @@ pub fn spawn(shared: Handle, helper: Arc<Helper>) -> Option<u16> {
                     publish_port(port);
                 }
                 // Cheap liveness refresh for the dashboard readout.
-                let (pid, name) = helper::frontmost(&helper);
+                let (pid, name) = helper::frontmost(&pool.session());
                 let mut s = shared.lock().unwrap();
                 if pid != 0 && !name.is_empty() {
                     s.frontmost = name;
@@ -132,12 +133,12 @@ pub fn spawn(shared: Handle, helper: Arc<Helper>) -> Option<u16> {
                 match stream {
                     Ok(stream) => {
                         let shared = shared.clone();
-                        let helper = helper.clone();
+                        let pool = pool.clone();
                         // One thread per connection: a slow client can never
                         // stall the control link.
                         let _ = thread::Builder::new()
                             .name("quiet-driver-req".to_string())
-                            .spawn(move || handle(stream, &shared, &helper));
+                            .spawn(move || handle(stream, &shared, &pool));
                     }
                     Err(_) => break,
                 }
@@ -157,7 +158,7 @@ pub fn shutdown() {
 
 // ------------------------------------------------------------------ http
 
-fn handle(mut stream: TcpStream, shared: &Handle, helper: &Helper) {
+fn handle(mut stream: TcpStream, shared: &Handle, pool: &WorkerPool) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
@@ -191,7 +192,7 @@ fn handle(mut stream: TcpStream, shared: &Handle, helper: &Helper) {
     let body = String::from_utf8_lossy(&bytes).into_owned();
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
-    let (status, reply) = route(method, path, query, &body, origin, shared, helper);
+    let (status, reply) = route(method, path, query, &body, origin, shared, pool);
 
     let response = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -222,8 +223,12 @@ fn route(
     body: &str,
     has_origin: bool,
     shared: &Handle,
-    helper: &Helper,
+    pool: &WorkerPool,
 ) -> (u16, String) {
+    // Tools that operate on the bound app talk to that app's own worker; the
+    // rest use the session worker. This is what keeps two bound apps from
+    // serialising on one helper process.
+    let helper = bound_helper(shared, pool);
     if has_origin {
         return (
             403,
@@ -240,15 +245,30 @@ fn route(
             json(&json!({
                 "ok": true,
                 "name": "quiet driver",
-                "endpoints": ["/health", "/status", "/observe", "/windows", "/tree", "/action", "/mcp"],
+                "endpoints": ["/health", "/status", "/observe", "/windows", "/tree", "/action", "/mcp", "/metrics"],
                 "running": shared.lock().unwrap().running
             })),
         ),
         ("GET", "/status") | ("GET", "/observe") => (200, status_json(shared)),
-        ("GET", "/windows") => (200, windows_json(helper)),
-        ("GET", "/tree") => (200, tree_json(shared, helper)),
-        ("POST", "/action") => (200, action(body, shared, helper)),
-        ("POST", "/mcp") => (200, mcp_body(body, shared, helper)),
+        ("GET", "/windows") => (200, windows_json(pool)),
+        ("GET", "/tree") => (200, tree_json(shared, pool)),
+        ("GET", "/metrics") => {
+            if query.contains("reset=1") {
+                crate::metrics::reset();
+            }
+            let (actions, started) = {
+                let s = shared.lock().unwrap();
+                (s.actions_total, s.started_at)
+            };
+            (200, json(&crate::metrics::snapshot(actions, started)))
+        }
+        ("POST", "/metrics") => {
+            // A harness begins a run by asking for a fresh distribution.
+            crate::metrics::reset();
+            (200, json(&json!({"ok": true, "reset": true})))
+        }
+        ("POST", "/action") => (200, action(body, shared, pool)),
+        ("POST", "/mcp") => (200, mcp_body(body, shared, pool)),
         ("GET", "/mcp") => (
             200,
             json(&json!({
@@ -261,10 +281,10 @@ fn route(
         ),
         ("GET", "/action") => {
             let merged = merge_query(query, body);
-            (200, action(&merged, shared, helper))
+            (200, action(&merged, shared, pool))
         }
         (_, "/") | (_, "/health") | (_, "/status") | (_, "/observe") | (_, "/windows") | (_, "/tree")
-        | (_, "/mcp") => {
+        | (_, "/mcp") | (_, "/metrics") => {
             (405, json(&json!({"ok": false, "error": "method not allowed"})))
         }
         _ => (404, json(&json!({"ok": false, "error": "not found"}))),
@@ -273,7 +293,7 @@ fn route(
 
 /// One JSON-RPC message in, one JSON-RPC message out. A batch is answered
 /// with a batch; a notification is answered with nothing.
-fn mcp_body(body: &str, shared: &Handle, helper: &Helper) -> String {
+fn mcp_body(body: &str, shared: &Handle, pool: &WorkerPool) -> String {
     let parsed: Result<Value, _> = serde_json::from_str(body);
     let Ok(value) = parsed else {
         return json(&json!({
@@ -285,14 +305,14 @@ fn mcp_body(body: &str, shared: &Handle, helper: &Helper) -> String {
     if let Some(items) = value.as_array() {
         let replies: Vec<Value> = items
             .iter()
-            .filter_map(|m| crate::mcp::handle_message(m, shared, helper))
+            .filter_map(|m| crate::mcp::handle_message(m, shared, pool))
             .collect();
         if replies.is_empty() {
             return String::new();
         }
         return json(&Value::Array(replies));
     }
-    match crate::mcp::handle_message(&value, shared, helper) {
+    match crate::mcp::handle_message(&value, shared, pool) {
         Some(reply) => json(&reply),
         None => String::new(),
     }
@@ -402,8 +422,9 @@ fn status_json(shared: &Handle) -> String {
     json(&value)
 }
 
-fn windows_json(helper: &Helper) -> String {
-    let list: Vec<Value> = helper::windows(helper)
+fn windows_json(pool: &WorkerPool) -> String {
+    let helper = pool.session();
+    let list: Vec<Value> = helper::windows(&helper)
         .into_iter()
         .filter(|w| w.layer == 0 && w.window_id > 0)
         .map(|w| {
@@ -420,12 +441,13 @@ fn windows_json(helper: &Helper) -> String {
     json(&json!({"ok": true, "windows": list}))
 }
 
-fn tree_json(shared: &Handle, helper: &Helper) -> String {
+fn tree_json(shared: &Handle, pool: &WorkerPool) -> String {
+    let helper = bound_helper(shared, pool);
     let target = shared.lock().unwrap().target.clone();
     let Some(t) = target else {
         return json(&json!({"ok": false, "error": "no app is bound yet"}));
     };
-    let nodes: Vec<Value> = helper::tree(helper, t.pid, 800)
+    let nodes: Vec<Value> = helper::tree(&helper, t.pid, 800)
         .into_iter()
         .filter(|n| n.frame.has_area() || n.role != "AXGroup")
         .map(|n| {
@@ -444,7 +466,8 @@ fn tree_json(shared: &Handle, helper: &Helper) -> String {
 
 // ------------------------------------------------------------------ actions
 
-fn action(body: &str, shared: &Handle, helper: &Helper) -> String {
+fn action(body: &str, shared: &Handle, pool: &WorkerPool) -> String {
+    let helper = bound_helper(shared, pool);
     let payload: Value = if body.trim().is_empty() {
         Value::Object(Map::new())
     } else {
@@ -466,9 +489,14 @@ fn action(body: &str, shared: &Handle, helper: &Helper) -> String {
     if tool.is_empty() {
         return json(&json!({"ok": false, "error": "missing_tool"}));
     }
-    if let Some(m) = obj.get("mode").and_then(|v| v.as_str()) {
-        match Mode::parse(m) {
-            Some(mode) => shared.lock().unwrap().mode = mode,
+    // A per-call mode applies to that call only. It must never rewrite the
+    // session: one focused call used to leave the whole session in focused
+    // mode, so every later plain action activated the target and restored
+    // focus — focus stealing the agent never asked for. Only `set_mode`
+    // changes the session.
+    let call_mode: Option<Mode> = match obj.get("mode").and_then(|v| v.as_str()) {
+        Some(m) => match Mode::parse(m) {
+            Some(mode) => Some(mode),
             None => {
                 return json(&json!({
                     "ok": false,
@@ -476,8 +504,9 @@ fn action(body: &str, shared: &Handle, helper: &Helper) -> String {
                     "message": format!("mode must be \"background\" or \"focused\", got \"{}\"", m)
                 }))
             }
-        }
-    }
+        },
+        None => None,
+    };
     {
         let s = shared.lock().unwrap();
         if !s.running && !matches!(tool.as_str(), "start_driver" | "resume" | "status") {
@@ -485,7 +514,9 @@ fn action(body: &str, shared: &Handle, helper: &Helper) -> String {
         }
     }
 
-    let report = execute(&tool, obj, shared, helper);
+    let started = std::time::Instant::now();
+    let report = execute(&tool, obj, call_mode, shared, &helper, pool);
+    crate::metrics::record(&tool, started.elapsed().as_micros() as u64, report.ok);
     {
         let mut s = shared.lock().unwrap();
         s.actions_total += 1;
@@ -516,9 +547,18 @@ fn action(body: &str, shared: &Handle, helper: &Helper) -> String {
     }))
 }
 
-fn execute(tool: &str, obj: &Map<String, Value>, shared: &Handle, helper: &Helper) -> ActionReport {
-    let mode = shared.lock().unwrap().mode;
-    let mut report = run_tool(tool, obj, shared, helper);
+fn execute(
+    tool: &str,
+    obj: &Map<String, Value>,
+    call_mode: Option<Mode>,
+    shared: &Handle,
+    helper: &Helper,
+    pool: &WorkerPool,
+) -> ActionReport {
+    // The effective mode for this call: an explicit per-call mode wins, and
+    // neither form touches the session.
+    let mode = call_mode.unwrap_or_else(|| shared.lock().unwrap().mode);
+    let mut report = run_tool(tool, obj, mode, shared, helper, pool);
     report.mode = mode.as_str().to_string();
     if let Some(t) = shared.lock().unwrap().target.clone() {
         report.target_label = t.label();
@@ -580,14 +620,32 @@ const TOOLS: &[&str] = &[
 pub fn execute_public(
     tool: &str,
     obj: &Map<String, Value>,
+    call_mode: Option<Mode>,
     shared: &Handle,
-    helper: &Helper,
+    pool: &WorkerPool,
 ) -> ActionReport {
-    run_tool(tool, obj, shared, helper)
+    let helper = bound_helper(shared, pool);
+    execute(tool, obj, call_mode, shared, &helper, pool)
 }
 
-fn run_tool(tool: &str, obj: &Map<String, Value>, shared: &Handle, helper: &Helper) -> ActionReport {
-    let mode = shared.lock().unwrap().mode;
+/// The worker for whatever is currently bound, or the session worker when
+/// nothing is. Called once per request, so a rebind between actions is picked
+/// up without any extra bookkeeping.
+fn bound_helper(shared: &Handle, pool: &WorkerPool) -> Arc<Helper> {
+    match shared.lock().unwrap().target.as_ref() {
+        Some(t) if !t.identity.is_empty() => pool.for_app(&t.identity),
+        _ => pool.session(),
+    }
+}
+
+fn run_tool(
+    tool: &str,
+    obj: &Map<String, Value>,
+    mode: Mode,
+    shared: &Handle,
+    helper: &Helper,
+    pool: &WorkerPool,
+) -> ActionReport {
 
     if !TOOLS.contains(&tool) {
         return ActionReport::err(format!(
@@ -646,8 +704,19 @@ fn run_tool(tool: &str, obj: &Map<String, Value>, shared: &Handle, helper: &Help
             let window = num(obj, "window_id").map(|n| n as u32);
             let owner = obj.get("agent").and_then(|v| v.as_str()).unwrap_or("default").to_string();
             let takeover = obj.get("takeover").and_then(|v| v.as_bool()).unwrap_or(false);
+            let previous_identity = shared.lock().unwrap().target.as_ref().map(|t| t.identity.clone());
             return match session::bind(helper, shared, &selector, window, &owner, takeover) {
                 Ok(t) => {
+                    // Give the app its worker now: the first action on it should
+                    // not pay for a process spawn. If the binding moved to a
+                    // different app, reap the old one so a session that hops
+                    // between apps does not accumulate worker processes.
+                    if let Some(previous) = previous_identity.as_ref() {
+                        if previous != &t.identity {
+                            pool.release(previous);
+                        }
+                    }
+                    let _ = pool.for_app(&t.identity);
                     let mut r = ActionReport::ok(format!("bound to {} as \"{}\"", t.label(), t.owner));
                     r.payload = Some(target_json(&t));
                     r
@@ -721,9 +790,15 @@ fn run_tool(tool: &str, obj: &Map<String, Value>, shared: &Handle, helper: &Help
             };
         }
         "unbind" => {
-            let mut s = shared.lock().unwrap();
-            s.target = None;
-            s.tree.clear();
+            let identity = shared.lock().unwrap().target.as_ref().map(|t| t.identity.clone());
+            {
+                let mut s = shared.lock().unwrap();
+                s.target = None;
+                s.tree.clear();
+            }
+            if let Some(id) = identity {
+                pool.release(&id);
+            }
             return ActionReport::ok("unbound");
         }
         "get_window_state" | "get_accessibility_tree" => {
@@ -1327,8 +1402,8 @@ mod tests {
     #[test]
     fn origin_is_refused() {
         let shared = test_shared();
-        let helper = Helper::new("unused".into());
-        let (status, body) = route("POST", "/action", "", "{\"tool\":\"click\"}", true, &shared, &helper);
+        let pool = WorkerPool::new("unused".into());
+        let (status, body) = route("POST", "/action", "", "{\"tool\":\"click\"}", true, &shared, &pool);
         assert_eq!(status, 403);
         assert!(body.contains("cross_origin_refused"));
     }
@@ -1336,18 +1411,51 @@ mod tests {
     #[test]
     fn unknown_tool_is_reported() {
         let shared = test_shared();
-        let helper = Helper::new("unused".into());
-        let (_, body) = route("POST", "/action", "", "{\"tool\":\"nope\"}", false, &shared, &helper);
+        let pool = WorkerPool::new("unused".into());
+        let (_, body) = route("POST", "/action", "", "{\"tool\":\"nope\"}", false, &shared, &pool);
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("unknown tool"));
     }
 
     #[test]
+    fn a_per_call_mode_never_changes_the_session() {
+        // The bug: one focused action left the whole session focused, so every
+        // later plain action activated the target and restored focus. A
+        // per-call mode must not survive the call.
+        let shared = test_shared();
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        shared.lock().unwrap().mode = Mode::Background;
+
+        // A call that asks for focused.
+        let body = r#"{"tool":"click_label","label":"7","mode":"focused"}"#;
+        let _ = action(body, &shared, &pool);
+        assert_eq!(
+            shared.lock().unwrap().mode,
+            Mode::Background,
+            "a per-call mode must not change the session"
+        );
+
+        // And the plain call after it stays background.
+        let reply: Value = serde_json::from_str(&action(r#"{"tool":"click_label","label":"7"}"#, &shared, &pool)).unwrap();
+        assert_eq!(reply["mode"], "background");
+    }
+
+    #[test]
+    fn set_mode_is_the_only_way_to_change_the_session() {
+        let shared = test_shared();
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let _ = action(r#"{"tool":"set_mode","mode":"focused"}"#, &shared, &pool);
+        assert_eq!(shared.lock().unwrap().mode, Mode::Focused);
+        let _ = action(r#"{"tool":"set_mode","mode":"background"}"#, &shared, &pool);
+        assert_eq!(shared.lock().unwrap().mode, Mode::Background);
+    }
+
+    #[test]
     fn action_without_binding_says_so() {
         let shared = test_shared();
-        let helper = Helper::new("unused".into());
-        let (_, body) = route("POST", "/action", "", "{\"tool\":\"click\",\"x\":1,\"y\":1}", false, &shared, &helper);
+        let pool = WorkerPool::new("unused".into());
+        let (_, body) = route("POST", "/action", "", "{\"tool\":\"click\",\"x\":1,\"y\":1}", false, &shared, &pool);
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("no app is bound"));
@@ -1356,18 +1464,18 @@ mod tests {
     #[test]
     fn missing_tool_and_bad_json_are_rejected() {
         let shared = test_shared();
-        let helper = Helper::new("unused".into());
-        let (_, body) = route("POST", "/action", "", "{}", false, &shared, &helper);
+        let pool = WorkerPool::new("unused".into());
+        let (_, body) = route("POST", "/action", "", "{}", false, &shared, &pool);
         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["error"], "missing_tool");
-        let (_, body) = route("POST", "/action", "", "{not json", false, &shared, &helper);
+        let (_, body) = route("POST", "/action", "", "{not json", false, &shared, &pool);
         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["error"], "bad_json");
     }
 
     #[test]
     fn bad_mode_is_rejected() {
         let shared = test_shared();
-        let helper = Helper::new("unused".into());
-        let (_, body) = route("POST", "/action", "", "{\"tool\":\"click\",\"mode\":\"sideways\"}", false, &shared, &helper);
+        let pool = WorkerPool::new("unused".into());
+        let (_, body) = route("POST", "/action", "", "{\"tool\":\"click\",\"mode\":\"sideways\"}", false, &shared, &pool);
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["error"], "bad_mode");
     }
@@ -1375,13 +1483,13 @@ mod tests {
     #[test]
     fn paused_driver_refuses_actions() {
         let shared = test_shared();
-        let helper = Helper::new("unused".into());
+        let pool = WorkerPool::new("unused".into());
         shared.lock().unwrap().running = false;
-        let (_, body) = route("POST", "/action", "", "{\"tool\":\"click\"}", false, &shared, &helper);
+        let (_, body) = route("POST", "/action", "", "{\"tool\":\"click\"}", false, &shared, &pool);
         let v: Value = serde_json::from_str(&body).unwrap();
         assert!(v["error"].as_str().unwrap().contains("paused"));
         // resume works and is reported
-        let (_, body) = route("POST", "/action", "", "{\"tool\":\"resume\"}", false, &shared, &helper);
+        let (_, body) = route("POST", "/action", "", "{\"tool\":\"resume\"}", false, &shared, &pool);
         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["ok"], true);
         assert!(shared.lock().unwrap().running);
     }
@@ -1418,9 +1526,9 @@ mod tests {
     #[test]
     fn method_and_path_errors() {
         let shared = test_shared();
-        let helper = Helper::new("unused".into());
-        assert_eq!(route("POST", "/status", "", "", false, &shared, &helper).0, 405);
-        assert_eq!(route("GET", "/nope", "", "", false, &shared, &helper).0, 404);
-        assert_eq!(route("GET", "/health", "", "", false, &shared, &helper).0, 200);
+        let pool = WorkerPool::new("unused".into());
+        assert_eq!(route("POST", "/status", "", "", false, &shared, &pool).0, 405);
+        assert_eq!(route("GET", "/nope", "", "", false, &shared, &pool).0, 404);
+        assert_eq!(route("GET", "/health", "", "", false, &shared, &pool).0, 200);
     }
 }

@@ -16,8 +16,16 @@ import ApplicationServices
 import AVFoundation
 import ScreenCaptureKit
 
-// ScreenCaptureKit asserts unless the process has an AppKit session.
-let _qdApp = NSApplication.shared
+// ScreenCaptureKit asserts unless the process has an AppKit session. Creating
+// it is expensive (~20 MB of AppKit), so it is done lazily, the first time a
+// recording is asked for — a worker that only presses buttons stays lean.
+var qdAppInitialised = false
+func ensureAppKit() {
+    if !qdAppInitialised {
+        qdAppInitialised = true
+        _ = NSApplication.shared
+    }
+}
 
 // MARK: - helpers
 
@@ -34,6 +42,46 @@ func axAttr(_ el: AXUIElement, _ name: String) -> AnyObject? {
 func axStr(_ el: AXUIElement, _ name: String) -> String {
     (axAttr(el, name) as? String) ?? ""
 }
+/// The element under a screen point, belonging to `pid`.
+///
+/// `AXUIElementCopyElementAtPosition` is one call into the window server and
+/// answers the same question the old tree walk did — that walk cost ~150 ms per
+/// click because it read every node's frame. This is the difference between a
+/// usable coordinate click and an unusable one.
+///
+/// The system-wide call can return an element from another app (the point may
+/// be over a window that is on top), so the result is checked against the pid.
+func hitTest(pid: Int32, x: Double, y: Double) -> (element: AXUIElement, role: String, title: String, description: String)? {
+    // Hit-test *inside the bound app*, not system-wide. The system-wide call
+    // answers "what is on top at this point", so for a backgrounded app it
+    // returns another application's element and we would fall back to the slow
+    // tree walk. The app element searches that app's own windows regardless of
+    // what is in front, which is exactly the question being asked.
+    var found: AXUIElement?
+    let rc = AXUIElementCopyElementAtPosition(appElement(pid), Float(x), Float(y), &found)
+    if rc == .success, let el = found {
+        var owner: pid_t = 0
+        AXUIElementGetPid(el, &owner)
+        if owner == pid {
+            return (el, axStr(el, "AXRole"), axStr(el, "AXTitle"), axStr(el, "AXDescription"))
+        }
+    }
+    // Fall back to the tree walk: the point may be over a child the system-wide
+    // call does not resolve, or the app may not publish positions.
+    let ax = appElement(pid)
+    var best: AXUIElement?
+    var bestArea = Double.greatestFiniteMagnitude
+    for el in walk(ax) {
+        let f = axFrame(el)
+        if f.width <= 0 || f.height <= 0 { continue }
+        if !f.contains(CGPoint(x: x, y: y)) { continue }
+        let area = f.width * f.height
+        if area < bestArea { bestArea = area; best = el }
+    }
+    guard let el = best else { return nil }
+    return (el, axStr(el, "AXRole"), axStr(el, "AXTitle"), axStr(el, "AXDescription"))
+}
+
 /// Read several attributes in one IPC round trip.
 ///
 /// Each `AXUIElementCopyAttributeValue` is a synchronous call into the target
@@ -270,6 +318,13 @@ func parseChord(_ chord: String) -> (CGKeyCode, CGEventFlags, String)? {
     return (code, flags, key)
 }
 
+/// Post a click to one process.
+///
+/// The gaps are the minimum that reliably separates the events for the target
+/// app's event loop, not a generous guess: at 8/14/0 ms the app still receives
+/// a distinct move, press and release, and the call costs ~22 ms instead of the
+/// 128 ms that 18/70/40 ms of sleeping did. Nothing after the release is needed —
+/// the event is already queued when `postToPid` returns.
 func postClick(pid: Int32, point: CGPoint, button: String) {
     let src = CGEventSource(stateID: .hidSystemState)
     let down: CGEventType = button == "right" ? .rightMouseDown : .leftMouseDown
@@ -278,15 +333,14 @@ func postClick(pid: Int32, point: CGPoint, button: String) {
     if let mv = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: btn) {
         mv.postToPid(pid)
     }
-    usleep(18_000)
+    usleep(8_000)
     if let d = CGEvent(mouseEventSource: src, mouseType: down, mouseCursorPosition: point, mouseButton: btn) {
         d.postToPid(pid)
     }
-    usleep(70_000)
+    usleep(14_000)
     if let u = CGEvent(mouseEventSource: src, mouseType: up, mouseCursorPosition: point, mouseButton: btn) {
         u.postToPid(pid)
     }
-    usleep(40_000)
 }
 
 
@@ -364,6 +418,7 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 /// Record one window for `seconds`. Works on the window's own surface, so the
 /// app may be background, occluded, minimised, or on another Space.
 func recordWindow(_ req: [String: Any]) -> [String: Any] {
+    ensureAppKit()
     let appName = req["app"] as? String ?? ""
     let pid = req["pid"] as? Int ?? 0
     let seconds = min(max((req["seconds"] as? Double) ?? Double(req["seconds"] as? Int ?? 3), 0.5), 60.0)
@@ -1023,50 +1078,26 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true, "nodes": rows]
 
     case "element_at":
-        let ax = appElement(pid)
-        let tx = num("x"), ty = num("y")
-        var best: AXUIElement?
-        var bestArea = Double.greatestFiniteMagnitude
-        var bestRole = "", bestDesc = "", bestTitle = ""
-        for el in walk(ax) {
-            let f = axFrame(el)
-            if f.width <= 0 || f.height <= 0 { continue }
-            if !f.contains(CGPoint(x: tx, y: ty)) { continue }
-            let area = f.width * f.height
-            if area < bestArea {
-                bestArea = area; best = el
-                bestRole = axStr(el, "AXRole")
-                bestDesc = axStr(el, "AXDescription")
-                bestTitle = axStr(el, "AXTitle")
-            }
+        guard let hit = hitTest(pid: Int32(pid), x: num("x"), y: num("y")) else {
+            return ["ok": false, "error": "nothing at (\(num("x")), \(num("y")))"]
         }
-        guard let el = best else { return ["ok": false, "error": "nothing at (\(tx), \(ty))"] }
-        let f = axFrame(el)
+        let f = axFrame(hit.element)
         return [
-            "ok": true, "role": bestRole, "description": bestDesc, "title": bestTitle,
-            "actions": axActions(el),
+            "ok": true, "role": hit.role, "description": hit.description, "title": hit.title,
+            "actions": axActions(hit.element),
             "x": f.origin.x, "y": f.origin.y, "w": f.size.width, "h": f.size.height,
         ]
 
     case "press_at":
-        let ax = appElement(pid)
-        let tx = num("x"), ty = num("y")
-        var best: AXUIElement?
-        var bestArea = Double.greatestFiniteMagnitude
-        for el in walk(ax) {
-            let f = axFrame(el)
-            if f.width <= 0 || f.height <= 0 { continue }
-            if !f.contains(CGPoint(x: tx, y: ty)) { continue }
-            let area = f.width * f.height
-            if area < bestArea { bestArea = area; best = el }
+        guard let hit = hitTest(pid: Int32(pid), x: num("x"), y: num("y")) else {
+            return ["ok": false, "error": "nothing at (\(num("x")), \(num("y")))"]
         }
-        guard let el = best else { return ["ok": false, "error": "nothing at (\(tx), \(ty))"] }
-        let rc = AXUIElementPerformAction(el, kAXPressAction as CFString).rawValue
+        let f = axFrame(hit.element)
+        let rc = AXUIElementPerformAction(hit.element, kAXPressAction as CFString).rawValue
         return [
             "ok": rc == 0, "rc": Int(rc),
-            "role": axStr(el, "AXRole"),
-            "description": axStr(el, "AXDescription"),
-            "title": axStr(el, "AXTitle"),
+            "role": hit.role, "description": hit.description, "title": hit.title,
+            "x": f.origin.x, "y": f.origin.y, "w": f.size.width, "h": f.size.height,
         ]
 
     case "press_label":

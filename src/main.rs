@@ -13,8 +13,10 @@
 mod desktop;
 mod helper;
 mod mcp;
+mod metrics;
 mod server;
 mod session;
+mod worker;
 mod workspace;
 mod shot;
 
@@ -22,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use helper::Helper;
+use worker::WorkerPool;
 use session::Handle;
 
 struct Config {
@@ -124,7 +126,7 @@ fn parse_config() -> Config {
 
 struct DriverApp {
     shared: Handle,
-    helper: Arc<Helper>,
+    pool: Arc<WorkerPool>,
     screenshot: Option<String>,
     screenshot_max_edge: Option<u32>,
     max_image_dimension: u32,
@@ -167,7 +169,7 @@ impl eframe::App for DriverApp {
         // Keep the picture of the bound app fresh, but at a calm rate.
         if now.duration_since(self.last_tree).as_millis() > 700 {
             self.last_tree = now;
-            desktop::refresh_tree(&self.helper, &self.shared);
+            desktop::refresh_tree(self.pool.session().as_ref(), &self.shared);
         }
 
         // The window is a viewer. Closing it hides the dashboard; the control
@@ -232,21 +234,22 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    let driver_helper = Arc::new(Helper::new(config.helper.clone()));
+    let pool = Arc::new(worker::WorkerPool::new(config.helper.clone()));
     let shared: Handle = Arc::new(Mutex::new(session::Shared::default()));
     let hide_window = Arc::new(AtomicBool::new(false));
     {
-        let perms = helper::permissions(&driver_helper);
+        let session = pool.session();
+        let perms = helper::permissions(&session);
         let mut s = shared.lock().unwrap();
         s.permissions = perms;
         s.helper_ready = perms.accessibility;
-        s.frontmost = helper::frontmost(&driver_helper).1;
+        s.frontmost = helper::frontmost(&session).1;
     }
 
     // Ctrl-C / SIGTERM should remove the published port file.
     ctrlc_shutdown();
 
-    let port = match server::spawn(shared.clone(), driver_helper.clone()) {
+    let port = match server::spawn(shared.clone(), pool.clone()) {
         Some(port) => port,
         None => {
             // Another process already serves the session. Do not linger as a
@@ -295,7 +298,7 @@ fn main() -> eframe::Result<()> {
 
     let app = DriverApp {
         shared,
-        helper: driver_helper,
+        pool: pool.clone(),
         screenshot: config.screenshot,
         screenshot_max_edge: config.screenshot_max_edge,
         max_image_dimension: config.max_image_dimension,
