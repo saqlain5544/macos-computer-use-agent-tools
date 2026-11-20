@@ -106,3 +106,24 @@ When a `log_friction` entry turns out to be a real, reproducible problem
 rather than a one-off, add it here with the same shape: what happens, why, the
 route around it, and the status. That way the next agent hits the knowledge
 instead of the wall.
+
+## Logged by agents
+
+These came from `log_friction` during development, verbatim. The live
+log is `/tmp/quiet-driver/friction.jsonl`; `friction_log` reads it back.
+
+- **file_dialog** — NSOpenPanel cannot be committed through accessibility: AXPress on Open/Cancel reports success and the panel stays open
+  
+  macOS 15, TextEdit. Panel is AXMainWindow of both the host pid and com.apple.appkit.xpc.openAndSavePanelService. AXPress, AXConfirm, posted Return, and a real HID click all leave it open. The filename field does accept a written path. Route around it with open_file.
+- **bind_app** — a leftover file panel makes an app report a phantom document window named Open or Save
+  
+  After an uncommitted NSOpenPanel, TextEdit keeps a zombie Open window in CGWindowList while AXWindows is empty. bind_app can land on it and documents lists it. Cancelling the panel inside the app (cmd+period) clears it.
+- **click_label** — click_label costs ~90 ms because it walks the whole accessibility tree one IPC call per node
+  
+  A 130-node app is ~130 synchronous round trips. Caching with an AXObserver is the fix; not done. set_value avoids the walk entirely and costs 3 ms.
+- **status** — binding an app that only exposes an accessory window picks the accessory
+  
+  macOS hangs windows titled Save Panel Accessory View / Open off apps. bind now filters them and prefers the largest titled non-accessory window, but a second app with only accessory windows would still bind to one.
+- **documents** — backgrounded Cocoa apps report AXWindows as empty, so windows are not a reliable document list
+  
+  TextEdit returns 0 AXWindows while AXMainWindow reports the front document. documents reads the Window menu and filters items whose AXIdentifier is makeKeyAndOrderFront:.
