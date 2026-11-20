@@ -95,7 +95,15 @@ struct ActionReport {
     var focusRestored = false
     var targetLabel = ""
     var mode = "background"
+    /// How the mode was chosen for this call: "session" or the caller asked.
+    var modeSource = "session"
     var payload: [String: Any]?
+    /// Measured phases in milliseconds, for the operation log. Anything a tool
+    /// wants to account for goes here rather than being guessed later.
+    var phases: [String: Double] = [:]
+    /// Focus detail: which app was in front before, which after, how long the
+    /// raise and the restore took, and how many attempts the restore needed.
+    var focusDetail: [String: Any] = [:]
 
     static func ok(_ detail: String) -> ActionReport {
         var r = ActionReport()

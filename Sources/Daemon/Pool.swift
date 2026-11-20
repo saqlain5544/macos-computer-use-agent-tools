@@ -43,6 +43,7 @@ final class WorkerPool {
         }
         workers[key] = fresh
         lock.unlock()
+        Server.logEvent("worker_start", ["identity": key])
         return fresh
     }
 
@@ -56,6 +57,7 @@ final class WorkerPool {
         lock.lock()
         let h = workers.removeValue(forKey: identity)
         lock.unlock()
+        if h != nil { Server.logEvent("worker_stop", ["identity": identity]) }
         h?.stop()
     }
 

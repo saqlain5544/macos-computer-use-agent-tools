@@ -335,6 +335,12 @@ final class Server {
         return jsonString(actionReport(tool, obj).json)
     }
 
+    /// Run one tool and record what it did.
+    ///
+    /// The record is the analysis surface: tool, agent, target, mode and where
+    /// that mode came from, total time, time spent waiting on the app, time spent
+    /// moving focus, whether focus moved and came back, whether the pointer
+    /// moved, and the failure reason. One line per operation, forever.
     func actionReport(_ tool: String, _ obj: [String: Any]) -> ActionReport {
         // A per-call mode applies to this call only. set_mode is the only thing
         // that changes the session: one focused call used to leave the whole
@@ -347,6 +353,20 @@ final class Server {
             }
             callMode = parsed
         }
+        // A session that is not allowed to watch cannot be in focused mode. This
+        // is belt and braces on top of the refusal in set_mode: whatever history
+        // left the mode set, the invariant holds on every call.
+        if shared.mode == .focused, !shared.watchEnabled {
+            shared.mode = .background
+        }
+
+        // Per-call focused is refused for the same reason set_mode focused is:
+        // the person decides whether an app comes to the front, not the caller.
+        if callMode == .focused, !shared.watchEnabled {
+            return ActionReport.err(
+                "focused mode is not available: whether an app comes to the front is the person's decision. "
+                + "Work in background mode, or ask them to enable Watch in the Quiet Driver dashboard.")
+        }
         let mode = callMode ?? shared.mode
         shared.noteAgent(agentId(obj))
 
@@ -356,14 +376,26 @@ final class Server {
 
         let started = Date()
         let agent = agentId(obj)
+        let helper = Tools.boundHelper(shared, pool, agent)
+        helper.beginOperation()
         let report = Tools.execute(tool: tool, args: obj, callMode: callMode,
                                    shared: shared, pool: pool, mode: mode, agent: agent)
         let micros = Date().timeIntervalSince(started) * 1_000_000
         metrics.record(tool, micros: micros, ok: report.ok)
+        let (workerCalls, workerMicros, workerDetail) = helper.operationStats()
 
         var final = report
         final.mode = callMode?.rawValue ?? shared.mode.rawValue
-        final.targetLabel = shared.target(for: agent)?.label ?? ""
+        final.modeSource = callMode != nil ? "call" : "session"
+        final.targetLabel = shared.effectiveTarget(for: agent)?.label ?? ""
+        final.phases["total_ms"] = round2(micros / 1000.0)
+        final.phases["worker_ms"] = round2(workerMicros / 1000.0)
+        final.phases["worker_calls"] = Double(workerCalls)
+        let accounted = final.phases["worker_ms"]! + (final.phases["focus_raise_ms"] ?? 0)
+            + (final.phases["focus_restore_ms"] ?? 0)
+        final.phases["driver_ms"] = round2(max(0, final.phases["total_ms"]! - accounted))
+        logOperation(tool: tool, args: obj, report: final, agent: agent,
+                     workerDetail: workerDetail)
         shared.actionsTotal += 1
         if !final.ok {
             shared.lastError = final.error
@@ -386,6 +418,58 @@ final class Server {
             }
         }
         return "default"
+    }
+
+    /// Write one operation record to the operation log.
+    private func logOperation(tool: String, args obj: [String: Any], report: ActionReport,
+                              agent: String, workerDetail: [(String, Double)] = []) {
+        guard let log = OpLog.shared else { return }
+        var record: [String: Any] = [
+            "kind": "op",
+            "agent": agent,
+            "tool": tool,
+            "args": loggableArguments(obj),
+            "mode": report.mode,
+            "mode_source": report.modeSource,
+            "target": report.targetLabel,
+            "ok": report.ok,
+            "detail": String(report.detail.prefix(300)),
+            "duration_ms": report.phases["total_ms"] ?? 0,
+            "phases": report.phases,
+            "pointer_moved": report.pointerMoved,
+            "focus": report.focusDetail.isEmpty
+                ? ["changed": report.focusChanged, "restored": report.focusRestored]
+                : report.focusDetail,
+            "screen_locked": shared.screenLocked,
+            "actions_total": shared.actionsTotal,
+        ]
+        if !report.ok { record["error"] = String(report.error.prefix(300)) }
+        // Which worker commands made up the time, in order. A click that made
+        // seven calls should say so, or the number is not actionable.
+        record["worker_calls"] = workerDetail.map { ["cmd": $0.0, "ms": round2($0.1)] }
+        if let payload = report.payload {
+            // A small, useful digest rather than the whole payload.
+            var digest: [String: Any] = [:]
+            for key in ["path", "bytes", "frames", "width", "height", "label", "window", "elapsed_ms"] {
+                if let v = payload[key] { digest[key] = v }
+            }
+            if !digest.isEmpty { record["result"] = digest }
+        }
+        log.write(record)
+    }
+
+    /// Write a non-tool record: daemon lifecycle, worker start/stop, mode and
+    /// watch changes. These explain the gaps between operations.
+    static func logEvent(_ kind: String, _ fields: [String: Any] = [:], shared: Shared? = nil) {
+        guard let log = OpLog.shared else { return }
+        var record = fields
+        record["kind"] = kind
+        record["ok"] = true
+        if let s = shared {
+            record["mode"] = s.mode.rawValue
+            record["watch_enabled"] = s.watchEnabled
+        }
+        log.write(record)
     }
 
     private func statusJSON(agent: String = "default") -> String {

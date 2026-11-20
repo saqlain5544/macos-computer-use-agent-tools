@@ -84,6 +84,39 @@ The driver never calls `CGWarpMouseCursorPosition`, `CGEvent.post(tap:)`, or
 guarantee, and it is checkable: sample the pointer and the frontmost app at
 20 Hz while the agent works.
 
+## Who decides that an app is visible
+
+Background is the default and the only mode an agent can choose. Watching an app
+come to the front is a decision about the person's screen, so it belongs to the
+person: the dashboard's **Watch** toggle (or `--watch` / `set_watch` from the
+operator surface) enables it, and only then does focused mode exist. Agents
+cannot reach `set_mode`, cannot pass `mode` per call, and are instructed not to
+ask for it. The invariant is enforced on every call: a session with watching off
+runs in background mode whatever state it was left in.
+
+## The operation log
+
+One JSON object per operation, appended to
+`~/.quiet-driver/logs/ops-YYYYMMDD.jsonl`, rotated at 32 MB with five kept. The
+record is built for analysis rather than for reading:
+
+| Field | Why it is there |
+|---|---|
+| `tool`, `agent`, `target`, `args` | who did what, where |
+| `mode`, `mode_source` | which mode ran it and who chose it |
+| `duration_ms`, `phases` | total, `worker_ms`, `driver_ms`, focus raise/restore |
+| `worker_calls` | the commands inside the operation and their cost — a click that made seven calls says which seven |
+| `focus` | changed/restored, the app before and after, attempts, timing |
+| `pointer_moved` | proof the person's pointer was not touched |
+| `ok`, `error` | what failed, in the failure's own words |
+| `screen_locked` | whether the run is comparable with an unlocked one |
+
+Daemon lifecycle, worker start/stop, permission changes, screen lock changes,
+mode changes and watch changes are logged as their own `kind`, so a gap between
+operations has an explanation. `scripts/analyze_logs.py` turns the file into
+latency percentiles, a phase breakdown, the guarantee counters and the failures
+grouped by reason.
+
 ## Bindings are per agent
 
 The first version kept one binding for the whole session. Two agents that bound

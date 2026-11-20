@@ -12,6 +12,26 @@ metadata:
 Use this when a Quiet Driver action failed, produced the wrong effect, or
 disturbed the person you were supposed to leave alone.
 
+## Start with the log
+
+Before guessing, read what actually happened. Every operation is recorded with
+its phases:
+
+```
+op_log { limit: 10, tool_filter: "click_label" }
+log_stats { since_seconds: 600 }
+```
+
+`op_log` gives the records — tool, agent, target, `duration_ms`, `phases`
+(`worker_ms`, `driver_ms`, focus raise/restore), the worker calls that made up
+the time, and the failure text. `log_stats` gives percentiles and the failure
+counts grouped by reason. On the machine itself:
+`./scripts/analyze_logs.py --since 10m`.
+
+A large `worker_ms` means the app was slow or unresponsive; a large `driver_ms`
+with a small `worker_ms` means the driver was. That distinction decides whose
+bug it is.
+
 ## First: did it actually fail?
 
 Every reply has `ok` and `error`. `ok: false` means nothing happened and

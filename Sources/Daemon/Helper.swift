@@ -77,6 +77,14 @@ final class Helper {
     private var fromWorker: FileHandle?
     private var buffer = Data()
     private var pointer = (x: 0.0, y: 0.0)
+    /// Time spent inside worker calls since the last reset. The operation log
+    /// uses this to separate "the driver thought" from "the app was slow".
+    private var callCount = 0
+    private var callMicros = 0.0
+    /// Every worker call this operation made: command and duration. Bounded, and
+    /// the reason is attribution — "this click made seven calls" is only useful
+    /// if the log says which seven.
+    private var callLog: [(String, Double)] = []
 
     /// Path to a prebuilt worker/helper, when the app was installed with one.
     let helperPath: String
@@ -129,6 +137,14 @@ final class Helper {
         stopLocked()
     }
 
+    /// Read whatever is available, without Foundation's buffering machinery.
+    private func readAvailable(_ handle: FileHandle) -> Data {
+        var tmp = [UInt8](repeating: 0, count: 16 * 1024)
+        let n = read(handle.fileDescriptor, &tmp, tmp.count)
+        if n <= 0 { return Data() }
+        return Data(tmp[0..<n])
+    }
+
     /// Is the worker's stdout readable within `timeoutMs`?
     private func pollReadable(_ handle: FileHandle, timeoutMs: Int32) -> Bool {
         var pfd = pollfd(fd: handle.fileDescriptor, events: Int16(POLLIN), revents: 0)
@@ -153,9 +169,48 @@ final class Helper {
 
     // MARK: transport
 
-    func call(_ request: [String: Any]) throws -> [String: Any] {
+    /// Reset the per-operation counters.
+    func beginOperation() {
+        lock.lock()
+        callCount = 0
+        callMicros = 0
+        callLog.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+
+    /// How many worker calls this operation made, how long they took, and which.
+    func operationStats() -> (calls: Int, micros: Double, detail: [(String, Double)]) {
         lock.lock()
         defer { lock.unlock() }
+        return (callCount, callMicros, callLog)
+    }
+
+    func call(_ request: [String: Any]) throws -> [String: Any] {
+        lock.lock()
+        let started = Date()
+        do {
+            let reply = try callLocked(request)
+            record(request, started)
+            lock.unlock()
+            return reply
+        } catch {
+            record(request, started)
+            lock.unlock()
+            throw error
+        }
+    }
+
+    private func record(_ request: [String: Any], _ started: Date) {
+        let micros = Date().timeIntervalSince(started) * 1_000_000
+        callCount += 1
+        callMicros += micros
+        if callLog.count < 24 {
+            callLog.append(((request["cmd"] as? String) ?? "?", micros / 1000.0))
+        }
+    }
+
+    /// The body of `call`, with the lock already held.
+    private func callLocked(_ request: [String: Any]) throws -> [String: Any] {
         let (input, output) = try ensureStarted()
         var line = jsonString(request)
         line += "\n"
@@ -203,7 +258,7 @@ final class Helper {
                 }
                 continue
             }
-            let chunk = handle.availableData
+            let chunk = readAvailable(handle)
             if chunk.isEmpty { return nil }
             buffer.append(chunk)
         }

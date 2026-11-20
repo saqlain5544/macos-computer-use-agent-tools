@@ -36,14 +36,18 @@ and restart it — the next action re-binds automatically. You can also call
 A point outside the window is refused with a clear message. Get the size from
 the bind reply's `bounds`, or from `status`.
 
-## Two modes
+## Background is the mode
 
-- **`background`** (default) — nothing on the person's screen changes. Use this.
-- **`focused`** — the target is raised for one action, then the person's app is
-  put back. Use only when they asked to watch. The reply reports
-  `focus_changed` and `focus_restored` honestly.
+You drive apps in the background: the app may be frontmost, behind other windows,
+minimised, on another Space, or hidden, and your actions go to its own process.
+The person's pointer never moves and their focus is never taken.
 
-Set per action with `"mode": "focused"`, or for the session with `set_mode`.
+**You cannot switch modes.** Whether an app comes to the front is the person's
+decision, not yours, so `set_mode` is not available to you and a per-call `mode`
+is refused. Work in the background; it is the right way to drive an app. If the
+person says they want to watch, tell them to turn on **Watch** in the Quiet
+Driver dashboard — do not ask them to bring the app forward, and do not suggest
+focused mode.
 
 ## Seeing the app
 
@@ -69,7 +73,8 @@ Before you fight with it, try the cheaper routes:
    save panel.
 
 If a dialog is genuinely unavoidable, say so rather than silently stealing
-focus. A `focused` action around it is honest and reversible.
+focus. You cannot switch to a focused mode to get past it; report the block with
+`log_friction` instead.
 
 ## Two agents, two apps
 
@@ -161,8 +166,9 @@ Read the collected backlog with `friction_log`.
 | `get_text` | | the bound app's text field |
 | `screenshot` | `path?`, `agent?` | PNG of the bound window |
 | `wait_for` | `kind`, `label?`/`text?`/`name?`, `timeout_ms?` | wait instead of polling: `label`, `text`, `document`, `window`, `change` |
+| `op_log` | `limit?`, `agent_filter?`, `tool_filter?`, `only_failures?` | what has been done, how long it took, and why anything failed |
+| `log_stats` | `since_seconds?` | latency percentiles per tool, failure counts, per-agent activity |
 | `record` | `seconds?`, `path?`, `agent?` | .mov of the bound window |
-| `set_mode` | `mode` | `background` or `focused` |
 | `log_friction` | `problem`, `detail?`, `source_tool?`, `agent?` | |
 | `friction_log` | `limit?` | read the backlog |
 | `workspace` | `agent?` | your directory and its contents |

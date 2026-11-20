@@ -159,14 +159,22 @@ check("every mcp tool is implemented",
 // A handful of names exist only on the HTTP surface: aliases an agent does not
 // need (`bind`, `type`, `key`), and operator controls (`pause`, `resume`,
 // `show_dashboard`) that belong to whoever runs the driver, not to a model.
+// set_mode and set_watch are operator controls: an agent can drive apps, but it
+// cannot decide that an app should come to the person's screen.
 let httpOnly: Set<String> = ["bind", "launch", "type", "key", "move", "press_button",
                              "stop_driver", "start_driver", "get_window_state",
                              "clipboard_read", "clipboard_write", "pause", "resume",
-                             "show_dashboard"]
+                             "show_dashboard", "set_mode", "set_watch"]
 let expectedOverMCP = Tools.names.filter { !httpOnly.contains($0) }
 check("every tool an agent needs is advertised over mcp",
       expectedOverMCP.allSatisfy { mcpNames.contains($0) },
       "\(expectedOverMCP.filter { !mcpNames.contains($0) })")
+
+// MARK: watching is the person's decision
+
+check("background is the default mode", Mode.background.rawValue == "background")
+check("agents are not offered a mode switch",
+      !MCP.toolNames.contains("set_mode") && !MCP.toolNames.contains("set_watch"))
 
 // MARK: paths and identity
 

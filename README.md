@@ -24,6 +24,26 @@ their window order never changes.
 | `plugin/` | the DeepSeek Harness plugin: an MCP bundle that exposes the driver to the agent |
 | `docs/` | how it works, what was measured, and what is still missing |
 
+## Watching is your decision
+
+The driver works in the background and never brings an app to the front on its
+own. If you want to watch an app being driven, turn on **Watch** in the
+dashboard — then focused mode is allowed. Agents cannot turn it on, cannot ask
+for it per call, and are told to work in the background.
+
+## Operation log
+
+Every operation is written to `~/.quiet-driver/logs/ops-YYYYMMDD.jsonl`: tool,
+agent, target, mode and where the mode came from, total time, time waiting on
+the app, time in the driver, time moving focus, which worker calls made up the
+time, whether focus moved and came back, whether the pointer moved, and why
+anything failed. Read it with `op_log`/`log_stats` over MCP, or analyse it:
+
+```bash
+./scripts/analyze_logs.py --since 1h        # latency, phases, failures, agents
+./scripts/analyze_logs.py --failures        # just what broke, and why
+```
+
 ## Quick start
 
 ```bash
@@ -174,6 +194,7 @@ Four suites, all runnable locally:
 | `scripts/acceptance.sh` | 27 checks against a real app: bind, drive, focus guard, lifecycle, MCP |
 | `scripts/tool_audit.py` | all 32 tools, asserting an observable effect where one is possible |
 | `scripts/concurrency.py` | two agents on two apps: bindings, ownership races, worker isolation |
+| `scripts/analyze_logs.py` | reads the operation log: latency, phases, failures, focus, per agent |
 | `perf/harness.py` | latency, memory, CPU, and the two invariants that must never break |
 
 That compiles the self-tests, builds the single binary, and refreshes

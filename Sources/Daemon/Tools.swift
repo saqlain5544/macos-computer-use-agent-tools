@@ -29,6 +29,7 @@ enum Tools {
         "stop_driver", "start_driver", "status", "show_dashboard", "clipboard_read",
         "clipboard_write", "screenshot", "record", "log_friction", "friction_log",
         "workspace", "open_file", "close_file", "documents", "wait_for",
+        "op_log", "log_stats", "set_watch",
     ]
 
     // MARK: worker selection
@@ -50,6 +51,7 @@ enum Tools {
         "launch_app", "launch", "quit_app", "unbind", "get_window_state",
         "get_accessibility_tree", "screenshot", "record", "open_file", "close_file",
         "documents", "log_friction", "friction_log", "workspace", "wait_for",
+        "op_log", "log_stats", "set_watch",
     ]
 
     /// Every name the dispatcher can reach.
@@ -138,8 +140,30 @@ enum Tools {
             guard let m = Mode.parse(asString(obj["mode"])) else {
                 return ActionReport.err("mode must be \"background\" or \"focused\"")
             }
+            // Background is the default and the only mode an agent may choose.
+            // Watching an app is the person's decision, so focused mode needs
+            // their consent, not the agent's preference.
+            if m == .focused, !shared.watchEnabled {
+                return ActionReport.err(
+                    "focused mode is not available: whether an app comes to the front is the person's decision. "
+                    + "Work in background mode; ask them to enable Watch in the Quiet Driver dashboard if they want to see it.")
+            }
             shared.mode = m
+            Server.logEvent("mode", ["to": m.rawValue], shared: shared)
             return ActionReport.ok("mode is now \(m.rawValue)")
+
+        case "set_watch":
+            // Operator control: the dashboard's Watch toggle and the CLI use it.
+            // It is deliberately absent from the MCP surface.
+            let enabled = asBool(obj["enabled"]) ?? asBool(obj["watch"]) ?? false
+            shared.watchEnabled = enabled
+            if !enabled, shared.mode == .focused {
+                shared.mode = .background
+            }
+            Server.logEvent("watch", ["enabled": enabled], shared: shared)
+            return ActionReport.ok(enabled
+                ? "watching enabled: focused mode is now allowed"
+                : "watching disabled; mode is background")
 
         case "status":
             // Reading state never needs a binding: an agent asks for status
@@ -408,6 +432,31 @@ enum Tools {
         case "wait_for":
             return waitFor(obj, shared, helper, agent)
 
+        case "op_log":
+            // The driver's own history, for an agent that wants to see what it
+            // (or another agent) has been doing, and for whoever is analysing.
+            guard let log = OpLog.shared else {
+                return ActionReport.err("the operation log is disabled (QD_OP_LOG=0)")
+            }
+            let limit = min(1000, max(1, asInt(obj["limit"]) ?? 100))
+            let rows = log.read(limit: limit,
+                                agent: asString(obj["agent_filter"]),
+                                tool: asString(obj["tool_filter"]),
+                                onlyFailures: asBool(obj["only_failures"]) ?? false,
+                                sinceSeconds: asInt(obj["since_seconds"]))
+            var r = ActionReport.ok("\(rows.count) operation record(s)")
+            r.payload = ["entries": rows, "log_directory": log.directory]
+            return r
+
+        case "log_stats":
+            guard let log = OpLog.shared else {
+                return ActionReport.err("the operation log is disabled (QD_OP_LOG=0)")
+            }
+            let seconds = max(10, asInt(obj["since_seconds"]) ?? 3600)
+            var r = ActionReport.ok("operation summary over the last \(seconds)s")
+            r.payload = log.summary(sinceSeconds: seconds)
+            return r
+
         case "workspace":
             let agent = agentId(obj)
             do {
@@ -541,15 +590,32 @@ enum Tools {
             return "point (\(x), \(y)) is outside the bound window (\(target.bounds.w)x\(target.bounds.h)); coordinates are relative to the window's top-left corner"
         }
 
+        /// Fold a focus outcome into the report: flags the caller promises, the
+        /// per-phase timings the log needs, and the app names either side.
+        func applyFocus(_ out: ActionReport, _ o: Session.FocusOutcome) -> ActionReport {
+            var r = out
+            r.focusChanged = o.changed
+            r.focusRestored = o.restored
+            r.phases["focus_raise_ms"] = round2(o.raiseMs)
+            r.phases["focus_restore_ms"] = round2(o.restoreMs)
+            r.focusDetail = [
+                "changed": o.changed,
+                "restored": o.restored,
+                "before_app": o.beforeApp,
+                "after_app": o.afterApp,
+                "raise_ms": round2(o.raiseMs),
+                "restore_ms": round2(o.restoreMs),
+                "restore_attempts": o.restoreAttempts,
+            ]
+            return r
+        }
+
         // Every delivered action runs through here so focused mode raises the
         // target for the duration and puts the person's app back afterwards.
         func deliver(_ body: () -> ActionReport) -> ActionReport {
             if mode == .focused {
-                let (r, changed, restored) = Session.withFocus(helper, target, body)
-                var out = r
-                out.focusChanged = changed
-                out.focusRestored = restored
-                return out
+                let (r, outcome) = Session.withFocus(helper, target, body)
+                return applyFocus(r, outcome)
             }
             return body()
         }
@@ -575,12 +641,12 @@ enum Tools {
                     let press = { () -> Result<Hit, Error> in
                         Result { try helper.pressAt(pid: target.pid, x: g.x, y: g.y) }
                     }
-                    var focusedFlags: (Bool, Bool)?
+                    var focusOutcome: Session.FocusOutcome?
                     var result: Result<Hit, Error>
                     if mode == .focused {
-                        let (res, changed, restored) = Session.withFocus(helper, target) { press() }
+                        let (res, outcome) = Session.withFocus(helper, target) { press() }
                         result = res
-                        focusedFlags = (changed, restored)
+                        focusOutcome = outcome
                     } else {
                         result = press()
                     }
@@ -596,10 +662,7 @@ enum Tools {
                     case .failure(let e):
                         r = ActionReport.err("AXPress at (\(x), \(y)) failed: \(e)")
                     }
-                    if let (changed, restored) = focusedFlags {
-                        r.focusChanged = changed
-                        r.focusRestored = restored
-                    }
+                    if let outcome = focusOutcome { r = applyFocus(r, outcome) }
                     r.pointerMoved = helper.pointerMoved(since: before)
                     return r
                 }
@@ -632,15 +695,14 @@ enum Tools {
             }
             var r: ActionReport
             if mode == .focused {
-                let (res, changed, restored) = Session.withFocus(helper, target) { action() }
+                let (res, outcome) = Session.withFocus(helper, target) { action() }
                 switch res {
                 case .success:
                     r = ActionReport.ok("\(tool) delivered to \(target.label) at (\(x), \(y))")
                 case .failure(let e):
                     r = ActionReport.err("\(e)")
                 }
-                r.focusChanged = changed
-                r.focusRestored = restored
+                r = applyFocus(r, outcome)
             } else {
                 switch action() {
                 case .success:

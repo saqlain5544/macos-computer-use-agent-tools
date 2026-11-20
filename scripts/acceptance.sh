@@ -130,11 +130,17 @@ rm -f /tmp/qd_acc_doc.txt
 post '{"tool":"unbind"}' > /dev/null
 
 echo
-echo "focused mode, on request"
+echo
+echo "watching is the person's decision"
 post '{"tool":"bind_app","app":"Calculator","agent":"acceptance","takeover":true}' > /dev/null
+post '{"tool":"set_watch","enabled":false}' > /dev/null
+post '{"tool":"set_mode","mode":"focused"}' > /tmp/qd_acc_focus_refused.json
+check "focused mode is refused without watching" "$(jqp 'not d["ok"] and "person" in d["error"]' < /tmp/qd_acc_focus_refused.json)"
+
+post '{"tool":"set_watch","enabled":true}' > /dev/null
 post '{"tool":"set_mode","mode":"focused"}' > /dev/null
 post '{"tool":"click_label","label":"6"}' > /tmp/qd_acc_focus.json
-check "focused action runs" "$(jqp 'd["ok"]' < /tmp/qd_acc_focus.json)"
+check "focused action runs once watching is on" "$(jqp 'd["ok"]' < /tmp/qd_acc_focus.json)"
 if [ "$LOCKED" = "True" ]; then
   printf '  %-44s SKIP\n' "focus change was reported"
 else
@@ -145,9 +151,18 @@ if [ "$LOCKED" = "True" ]; then
 else
   check "focus was restored" "$(jqp 'd["focus_restored"]' < /tmp/qd_acc_focus.json)"
 fi
-post '{"tool":"set_mode","mode":"background"}' > /dev/null
+post '{"tool":"set_watch","enabled":false}' > /dev/null
+post '{"tool":"click_label","label":"6"}' > /tmp/qd_acc_bg.json
+check "watching off returns to background" "$(jqp 'not d["focus_changed"]' < /tmp/qd_acc_bg.json)"
 
 echo
+echo "the operation log"
+post '{"tool":"op_log","limit":5}' > /tmp/qd_acc_oplog.json
+check "operations are logged" "$(jqp 'len(d["data"]["entries"]) > 0' < /tmp/qd_acc_oplog.json)"
+check "records carry a duration" "$(jqp 'all("duration_ms" in e for e in d["data"]["entries"] if e.get("kind") == "op")' < /tmp/qd_acc_oplog.json)"
+post '{"tool":"log_stats"}' > /tmp/qd_acc_stats.json
+check "the summary counts tools" "$(jqp 'len(d["data"]["tools"]) > 0' < /tmp/qd_acc_stats.json)"
+
 echo "the MCP surface"
 MCP=$(curl -s -m 20 -X POST "$BASE/mcp" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')

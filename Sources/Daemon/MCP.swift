@@ -9,7 +9,7 @@ enum MCP {
     static let supportedVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"]
 
     static let instructions = """
-    Quiet Driver drives real macOS apps in the background. Bind to an app first with bind_app; every later tool acts on that app. The app may be frontmost, behind other windows, minimised, on another Space, or hidden: control goes through Accessibility and per-process events, so the person's pointer, focus, and window order are never touched. Coordinates are relative to the bound window's top-left corner. The default mode is background; set_mode focused only when the person asks to watch. Each agent has a workspace under /tmp/quiet-driver/agent-<id>/ for screenshots and recordings. When the driver gets in your way, call log_friction with what went wrong.
+    Quiet Driver drives real macOS apps in the background: that is the default and the only mode you can choose, and it is the right one — the app can be frontmost, behind other windows, minimised, on another Space, or hidden, and control goes through Accessibility and per-process events so the person's pointer, focus and window order are never touched. Coordinates are relative to the bound window's top-left corner. Whether an app comes to the front is the person's decision, not yours: never ask them to make it visible so your work is easier, and never suggest focused mode. If they say they want to watch, they can enable Watch in the Quiet Driver dashboard themselves. Each agent has a workspace under /tmp/quiet-driver/agent-<id>/ for screenshots and recordings. op_log and log_stats show what you have done and how long it took. When the driver gets in your way, call log_friction with what went wrong.
     """
 
     // MARK: tool specs
@@ -30,10 +30,6 @@ enum MCP {
     }
     private static var agent: [String: Any] {
         str("Your agent id. Gives you your own workspace for screenshots and recordings, and names you as the owner when binding an app.")
-    }
-    private static var mode: [String: Any] {
-        ["type": "string", "enum": ["background", "focused"],
-         "description": "For this call only. background (default) never disturbs the person; focused raises the target for the action and restores their app afterwards."]
     }
 
     private struct Spec {
@@ -75,10 +71,10 @@ enum MCP {
             Spec(name: "click",
                  description: "Click a point in the bound window. Presses the control under the point when there is one, otherwise delivers a click to the app's own process. Never moves the person's pointer.",
                  schema: { obj(["x": num("x in window coordinates"), "y": num("y in window coordinates"),
-                                "agent": agent, "mode": mode], ["x", "y"]) }),
+                                "agent": agent], ["x", "y"]) }),
             Spec(name: "double_click",
                  description: "Double-click a point in the bound window.",
-                 schema: { obj(["x": num("x"), "y": num("y"), "agent": agent, "mode": mode], ["x", "y"]) }),
+                 schema: { obj(["x": num("x"), "y": num("y"), "agent": agent], ["x", "y"]) }),
             Spec(name: "right_click",
                  description: "Right-click a point in the bound window.",
                  schema: { obj(["x": num("x"), "y": num("y")], ["x", "y"]) }),
@@ -95,23 +91,23 @@ enum MCP {
                                 "lines": num("Lines to scroll; positive scrolls down")], ["x", "y"]) }),
             Spec(name: "type_text",
                  description: "Type text into the bound app's focused text field, wherever the caret is.",
-                 schema: { obj(["text": str("Text to type"), "agent": agent, "mode": mode], ["text"]) }),
+                 schema: { obj(["text": str("Text to type"), "agent": agent], ["text"]) }),
             Spec(name: "press_key",
                  description: "Press one key in the bound app, e.g. \"Return\" or \"Tab\".",
-                 schema: { obj(["text": str("Key name, e.g. Return"), "mode": mode], ["text"]) }),
+                 schema: { obj(["text": str("Key name, e.g. Return")], ["text"]) }),
             Spec(name: "hotkey",
                  description: "Press a key chord in the bound app, e.g. \"cmd+shift+t\".",
-                 schema: { obj(["text": str("Chord, e.g. cmd+shift+t"), "mode": mode], ["text"]) }),
+                 schema: { obj(["text": str("Chord, e.g. cmd+shift+t")], ["text"]) }),
             Spec(name: "set_value",
                  description: "Set the bound app's text field to a value directly, rather than typing it.",
-                 schema: { obj(["text": str("New value"), "mode": mode], ["text"]) }),
+                 schema: { obj(["text": str("New value")], ["text"]) }),
             Spec(name: "set_caret",
                  description: "Move the insertion point in the bound app's text field. location 0 = start, 1 = end, other values are an absolute offset.",
                  schema: { obj(["location": num("0 = start, 1 = end, else absolute offset"),
                                 "length": num("0 = no selection, -1 = to the end")], ["location"]) }),
             Spec(name: "click_label",
                  description: "Press a control in the bound app by its label, e.g. \"Equals\" or \"Save\". Matching is exact first, then case-insensitive, then a unique word subset.",
-                 schema: { obj(["label": str("control label"), "mode": mode], ["label"]) }),
+                 schema: { obj(["label": str("control label")], ["label"]) }),
             Spec(name: "get_text",
                  description: "Read the bound app's text field.",
                  schema: { obj([:], []) }),
@@ -133,9 +129,6 @@ enum MCP {
             Spec(name: "documents",
                  description: "The documents the bound app has open.",
                  schema: { obj([:], []) }),
-            Spec(name: "set_mode",
-                 description: "Change the session mode. background (default) never disturbs the person; focused raises the target for each action and restores their app afterwards.",
-                 schema: { obj(["mode": ["type": "string", "enum": ["background", "focused"]]], ["mode"]) }),
             Spec(name: "log_friction",
                  description: "Record a problem you hit while driving an app, so it can be fixed later.",
                  schema: { obj(["problem": str("what went wrong"),
@@ -161,6 +154,16 @@ enum MCP {
                     "timeout_ms": num("How long to wait, default 5000, max 30000"),
                     "interval_ms": num("How often to check, default 100"),
                  ], ["kind"]) }),
+            Spec(name: "op_log",
+                 description: "Read the driver's own operation log: what was called, by which agent, how long it took, whether focus moved, and why anything failed.",
+                 schema: { obj(["limit": num("how many records, default 100"),
+                                "agent_filter": str("only records from this agent"),
+                                "tool_filter": str("only records for this tool"),
+                                "only_failures": bool("only failed operations"),
+                                "since_seconds": num("only records newer than this")], []) }),
+            Spec(name: "log_stats",
+                 description: "Summary of recent operations: latency percentiles per tool, failure counts, per-agent activity, and how often focus or the pointer moved.",
+                 schema: { obj(["since_seconds": num("window, default 3600")], []) }),
             Spec(name: "status",
                  description: "The driver's state: bound target, mode, frontmost app, permissions, counters.",
                  schema: { obj([:], []) }),

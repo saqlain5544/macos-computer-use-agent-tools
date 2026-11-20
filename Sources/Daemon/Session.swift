@@ -31,6 +31,12 @@ final class Shared {
     private var _boundsRefreshedAt: UInt64 = 0
     private let startedAt = UInt64(Date().timeIntervalSince1970)
     private var _screenLocked = false
+    /// Whether the person has allowed the driver to bring an app forward.
+    ///
+    /// Background is the default and the only mode an agent can ask for. Seeing
+    /// an app being driven is the person's choice, so focused mode is gated on
+    /// this, and only the dashboard, the CLI flag or `set_watch` can turn it on.
+    private var _watchEnabled = false
     private var _tree: [Node] = []
 
     // MARK: accessors
@@ -66,14 +72,17 @@ final class Shared {
     func effectiveTarget(for agent: String) -> Target? {
         let key = agent.isEmpty ? "default" : agent
         // "default" is what an unnamed caller becomes, so it counts as unnamed.
-        let unnamed = agent.isEmpty || key == "default"
-        return locked {
-            if let t = _targets[key] { return t }
-            // A caller that names nobody gets the app most recently bound; that
-            // is the one it means. With an explicit agent there is no guess.
-            if unnamed, let last = _lastBound { return _targets[last] }
-            return nil
+        // It never has a privileged binding of its own: an unnamed caller means
+        // "the app I just bound", which is the most recent binding. Preferring a
+        // long-lived "default" entry over that sent calls to whatever app that
+        // entry happened to hold.
+        if agent.isEmpty || key == "default" {
+            return locked {
+                if let last = _lastBound, let t = _targets[last] { return t }
+                return _targets[key]
+            }
         }
+        return locked { _targets[key] }
     }
 
     func setTarget(_ target: Target?, for agent: String) {
@@ -104,12 +113,15 @@ final class Shared {
     /// own if it has one, otherwise the single binding it fell back to.
     func bindingKey(for agent: String) -> String {
         let key = agent.isEmpty ? "default" : agent
-        let unnamed = agent.isEmpty || key == "default"
-        return locked {
-            if _targets[key] != nil { return key }
-            if unnamed, let last = _lastBound { return last }
-            return key
+        // Writes go back where the read came from, which for an unnamed caller is
+        // the most recent binding rather than a "default" slot.
+        if agent.isEmpty || key == "default" {
+            return locked {
+                if let last = _lastBound, _targets[last] != nil { return last }
+                return key
+            }
         }
+        return locked { _targets[key] != nil ? key : key }
     }
 
     /// Does any agent other than `agent` hold this app?
@@ -181,6 +193,11 @@ final class Shared {
         set { locked { _screenLocked = newValue } }
     }
 
+    var watchEnabled: Bool {
+        get { locked { _watchEnabled } }
+        set { locked { _watchEnabled = newValue } }
+    }
+
     var tree: [Node] {
         get { locked { _tree } }
         set { locked { _tree = newValue } }
@@ -239,6 +256,7 @@ final class Shared {
                 "last_error": _lastError,
                 "worker_ready": _workerReady,
                 "screen_locked": _screenLocked,
+                "watch_enabled": _watchEnabled,
                 "started_at": Int(startedAt),
                 "log": Array(_log.suffix(40)),
             ]
@@ -516,22 +534,42 @@ enum Session {
         (x: target.bounds.x + x, y: target.bounds.y + y)
     }
 
+    /// What the focus guard did, and what it cost.
+    struct FocusOutcome {
+        var changed = false
+        var restored = false
+        var beforeApp = ""
+        var beforePid: Int32 = 0
+        var afterApp = ""
+        var raiseMs = 0.0
+        var restoreMs = 0.0
+        var restoreAttempts = 0
+    }
+
     /// Focus behaviour, and an honest report of what it did.
     ///
     /// Background mode never calls this. In focused mode the target is raised,
     /// the action runs, and the app the person was using is put back.
-    static func withFocus<T>(_ helper: Helper, _ target: Target, _ body: () -> T) -> (T, Bool, Bool) {
-        let (beforePid, _) = helper.frontmost()
+    static func withFocus<T>(_ helper: Helper, _ target: Target, _ body: () -> T) -> (T, FocusOutcome) {
+        var outcome = FocusOutcome()
+        let (beforePid, beforeName) = helper.frontmost()
+        outcome.beforePid = beforePid
+        outcome.beforeApp = beforeName
+
         if beforePid == target.pid {
-            return (body(), false, false)
+            return (body(), outcome)
         }
+
+        let raiseStarted = Date()
         var cameForward = (try? helper.activate(pid: target.pid)) != nil
         if !cameForward {
             cameForward = waitForFrontmost(helper, target.pid, ms: 300)
         }
         try? helper.raiseWindow(pid: target.pid)
+        outcome.raiseMs = Date().timeIntervalSince(raiseStarted) * 1000
+
         let out = body()
-        let changed = cameForward && beforePid != 0 && beforePid != target.pid
+        outcome.changed = cameForward && beforePid != 0 && beforePid != target.pid
 
         // Put the person's app back, and verify rather than assume.
         //
@@ -539,18 +577,22 @@ enum Session {
         // window, or a modal sheet can swallow the first one. The driver's whole
         // promise is that the person ends up where they started, so this retries
         // and checks the frontmost app instead of trusting the call's return.
-        var restored = false
-        if changed {
+        if outcome.changed {
+            let restoreStarted = Date()
             for attempt in 0..<3 {
+                outcome.restoreAttempts = attempt + 1
                 if (try? helper.activate(pid: beforePid)) != nil,
                    waitForFrontmost(helper, beforePid, ms: 300) {
-                    restored = true
+                    outcome.restored = true
                     break
                 }
                 if attempt < 2 { usleep(120_000) }
             }
+            outcome.restoreMs = Date().timeIntervalSince(restoreStarted) * 1000
         }
-        return (out, changed, restored)
+        let (_, afterName) = helper.frontmost()
+        outcome.afterApp = afterName
+        return (out, outcome)
     }
 
     static func waitForFrontmost(_ helper: Helper, _ pid: Int32, ms: Int) -> Bool {

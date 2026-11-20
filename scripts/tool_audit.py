@@ -274,9 +274,26 @@ def main() -> int:
     r = post("set_value", text="after relaunch")
     check("auto rebind after relaunch", r["ok"], (r.get("error") or "")[:50])
 
-    # --- modes
+    # --- watching is the person's decision, not the agent's
     post("bind_app", app="Calculator", agent="audit", takeover=True)
-    post("set_mode", mode="focused")
+    post("set_watch", enabled=False)
+    r = post("set_mode", mode="focused")
+    check("focused mode is refused without the person's consent",
+          not r["ok"] and "person's decision" in (r.get("error") or ""),
+          (r.get("error") or "")[:60])
+    r = post("click_label", label="9", mode="focused")
+    check("a per-call focused mode is refused too",
+          not r["ok"] and "person's decision" in (r.get("error") or ""),
+          (r.get("error") or "")[:60])
+    r = post("click_label", label="9")
+    check("background work needs no consent", r["ok"] and not r["focus_changed"],
+          f"ok={r['ok']} focus={r['focus_changed']} mode={r['mode']} err={(r.get('error') or '')[:40]}")
+
+    # The dashboard (or the CLI) turns watching on; then focused mode is allowed.
+    post("set_watch", enabled=True)
+    r = post("set_mode", mode="focused")
+    check("focused mode works once the person allows watching", r["ok"],
+          (r.get("error") or "")[:50])
     r = post("click_label", label="9")
     if locked:
         skip("focused mode moves focus", "screen locked")
@@ -284,12 +301,10 @@ def main() -> int:
         check("focused mode never leaves focus moved",
               r["focus_changed"] == r["focus_restored"] or (r["focus_changed"] and r["focus_restored"]),
               f"changed={r['focus_changed']} restored={r['focus_restored']}")
-    post("set_mode", mode="background")
+    post("set_watch", enabled=False)
+    check("turning watching off returns to background", get("/status")["mode"] == "background")
     r = post("click_label", label="9")
     check("background mode reports no move", not r["focus_changed"])
-    check("per-call mode does not stick",
-          post("click_label", label="9", mode="focused")["mode"] == "focused"
-          and get("/status")["mode"] == "background")
 
     # --- friction log
     r = post("log_friction", problem="audit entry", agent="audit")

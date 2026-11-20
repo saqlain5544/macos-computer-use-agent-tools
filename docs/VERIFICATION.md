@@ -368,7 +368,34 @@ pointer moves.
 
 Run it with `./scripts/concurrency.py`; it takes about ten seconds.
 
-## 19. What is *not* verified
+## 19. The operation log
+
+Every operation is one JSON line. What the log has already found:
+
+- **100% of a cold action's time is waiting on the app.** The first click on a
+  freshly bound app spent 42 ms enumerating windows and 107 ms walking its
+  control tree; the driver itself accounted for under 1 ms.
+- **A warm click made two worker calls and took 17 ms.** With the breakdown
+  recorded per call, that was two facts: the second call was a cache miss, and
+  the pipe round trip cost ~12 ms because Foundation's `availableData` sets up
+  its own wait per read. Reading the descriptor directly halved it.
+
+That is the loop this log exists for: measure, attribute, fix, remeasure.
+
+## 20. Watching is the person's decision
+
+| Rule | How it is enforced |
+|---|---|
+| background is the default and the only mode an agent may choose | `set_mode` is not on the MCP surface |
+| a per-call focused mode is refused | the call is rejected with the reason |
+| focused requires the person's consent | `set_mode focused` refuses unless Watch is on |
+| a session left in focused mode cannot run focused | every call forces background when watching is off |
+| watching is a dashboard switch | the viewer's **Watch** toggle calls `set_watch`, which is not on the MCP surface |
+
+The tool audit and the acceptance sweep both check the refusal path, not just
+the happy one.
+
+## 21. What is *not* verified
 
 Honesty about the edges:
 

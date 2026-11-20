@@ -68,6 +68,13 @@ final class Driver {
 
     func run(preferredPort: UInt16) -> UInt16? {
         guard let port = server.start(preferredPort: preferredPort) else { return nil }
+        // Say hello in the log first, so a gap at the start has an explanation.
+        Server.logEvent("daemon_start", [
+            "pid": Int(ProcessInfo.processInfo.processIdentifier),
+            "port": Int(port),
+            "version": appVersion,
+            "log": opLog.directory,
+        ], shared: shared)
         probe()
         probeTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.probe()
@@ -82,9 +89,19 @@ final class Driver {
         server.republishIfMissing()
         let helper = pool.session()
         let perms = helper.permissions()
+        let wasReady = shared.workerReady
         shared.permissions = perms
         shared.workerReady = perms.allGranted
+        if wasReady != perms.allGranted {
+            Server.logEvent("permissions", ["all_granted": perms.allGranted,
+                                            "detail": perms.json], shared: shared)
+        }
         let locked = helper.screenLocked()
+        if locked != shared.screenLocked {
+            // A lock changes what accessibility and capture do; operations after
+            // this point are not comparable with the ones before it.
+            Server.logEvent("screen_lock", ["locked": locked], shared: shared)
+        }
         shared.screenLocked = locked
         let (pid, name) = helper.frontmost()
         if pid != 0, !name.isEmpty { shared.frontmost = name }
@@ -93,6 +110,8 @@ final class Driver {
 
     func stop() {
         probeTimer?.invalidate()
+        Server.logEvent("daemon_stop", ["pid": Int(ProcessInfo.processInfo.processIdentifier)], shared: shared)
+        opLog.close()
         server.stop()
         pool.releaseAll()
     }
@@ -196,6 +215,11 @@ guard let lockFd = instanceLock() else {
 
 let helperPath = flagValue("--helper") ?? ""
 let preferredPort = UInt16(flagValue("--port") ?? ProcessInfo.processInfo.environment["QD_PORT"] ?? "") ?? 0
+
+// The operation log. QD_OP_LOG=0 turns it off; the path is under the same
+// directory as the port file so an analysis always knows where to look.
+let opLog = OpLog(directory: OpLog.defaultDirectory(), enabled: OpLog.isEnabledByEnvironment)
+OpLog.shared = opLog
 
 let driver = Driver(helperPath: helperPath)
 

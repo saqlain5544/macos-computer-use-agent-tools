@@ -40,8 +40,13 @@ struct DashboardView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
-                badge(model.mode == "focused" ? "FOCUSED" : "BACKGROUND",
-                      color: model.mode == "focused" ? .orange : .green)
+                HStack(spacing: 6) {
+                    if model.watchEnabled {
+                        badge("WATCHING", color: .blue)
+                    }
+                    badge(model.mode == "focused" ? "FOCUSED" : "BACKGROUND",
+                          color: model.mode == "focused" ? .orange : .green)
+                }
                 Text("port \(model.port)").font(.caption.monospaced()).foregroundStyle(.secondary)
             }
         }
@@ -137,6 +142,8 @@ struct DashboardView: View {
         HStack {
             Text(model.hint).font(.caption).foregroundStyle(.secondary)
             Spacer()
+            Button(model.watchEnabled ? "Watching: on" : "Watch") { model.toggleWatch() }
+                .help("Bring the driven app to the front so you can see it. Off by default; agents cannot turn this on.")
             if model.paused {
                 Button("Resume") { model.resume() }
             } else {
@@ -187,6 +194,7 @@ final class DashboardModel: ObservableObject {
     @Published var postEvents = false
     @Published var capture = false
     @Published var paused = false
+    @Published var watchEnabled = false
     @Published var port = 0
     @Published var log: [(tool: String, detail: String, ok: Bool)] = []
     @Published var hint = ""
@@ -246,6 +254,7 @@ final class DashboardModel: ObservableObject {
         actionsTotal = (snap["actions_total"] as? Int) ?? 0
         focusMoved = (snap["focus_events"] as? Int) ?? 0
         paused = !((snap["running"] as? Bool) ?? true)
+        watchEnabled = (snap["watch_enabled"] as? Bool) ?? false
         port = (snap["port"] as? Int) ?? 0
         agentCount = (snap["agents"] as? [String])?.count ?? 0
         if let perms = snap["permissions"] as? [String: Any] {
@@ -295,6 +304,20 @@ final class DashboardModel: ObservableObject {
             }
         }
         return (role: role, label: "")
+    }
+
+    /// The person's switch: whether an app may come to the front so they can
+    /// watch it being driven. Agents cannot reach this; it is why focused mode
+    /// exists at all.
+    func toggleWatch() {
+        let body = "{\"tool\":\"set_watch\",\"enabled\":\(watchEnabled ? "false" : "true")}"
+        if let port = remotePort {
+            _ = HTTP.postJSON(port: port, path: "/action", body: body)
+        } else if let shared = shared {
+            shared.watchEnabled.toggle()
+            if !shared.watchEnabled { shared.mode = .background }
+        }
+        refresh()
     }
 
     func pause() { call("pause") }

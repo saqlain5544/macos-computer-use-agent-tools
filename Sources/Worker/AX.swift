@@ -1490,7 +1490,18 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         if controls.isEmpty { scan(ax, 0) }
 
-        controlCache[pid] = (controls, controls.map { axFrame($0.0) }, Date())
+        // Nothing found: give the app one settling frame and look again. A
+        // relaunching or still-laying-out app has no controls for a moment.
+        if controls.isEmpty {
+            usleep(120_000)
+            controlCache[pid] = nil
+            if let mw = axAttr(ax, "AXMainWindow") { scan(mw as! AXUIElement, 0) }
+            if controls.isEmpty { scan(ax, 0) }
+        }
+
+        if !controls.isEmpty {
+            controlCache[pid] = (controls, controls.map { axFrame($0.0) }, Date())
+        }
         guard let hit = matchControl(controls, label) else {
             let sample = controls.prefix(16).map { $0.1 }.joined(separator: ", ")
             return [
