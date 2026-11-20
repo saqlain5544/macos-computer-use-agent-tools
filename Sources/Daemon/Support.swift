@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // MARK: - shapes shared by the daemon, the tools and the MCP surface
@@ -9,6 +10,8 @@ struct Rect: Equatable {
     var h: Double = 0
 
     var json: [String: Any] { ["x": x, "y": y, "w": w, "h": h] }
+
+    var cgRect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
 
     static func from(_ d: [String: Any]?) -> Rect {
         guard let d = d else { return Rect() }
@@ -74,6 +77,8 @@ struct Target: Equatable {
     /// accessibility actions still reach it. That difference decides which tools
     /// can work, so the target carries it.
     var onScreen: Bool = true
+    /// Where the window was before the driver staged it onto its own display.
+    var originalFrame: Rect? = nil
 
     var label: String { windowTitle.isEmpty ? appName : "\(appName) · \(windowTitle)" }
 

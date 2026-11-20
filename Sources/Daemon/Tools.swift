@@ -28,7 +28,7 @@ enum Tools {
         "click_label", "press_button", "get_text", "set_mode", "pause", "resume",
         "stop_driver", "start_driver", "status", "show_dashboard", "clipboard_read",
         "clipboard_write", "screenshot", "ocr", "record", "log_friction", "friction_log",
-        "workspace", "open_file", "close_file", "documents", "wait_for",
+        "workspace", "open_file", "close_file", "documents", "wait_for", "stage", "unstage",
         "op_log", "log_stats", "set_watch",
     ]
 
@@ -49,7 +49,7 @@ enum Tools {
         "show_dashboard", "start_driver", "resume", "stop_driver", "pause", "set_mode",
         "status", "list_windows", "get_desktop_state", "bind_app", "bind", "rebind",
         "launch_app", "launch", "quit_app", "unbind", "get_window_state",
-        "get_accessibility_tree", "screenshot", "ocr", "record", "open_file", "close_file",
+        "get_accessibility_tree", "screenshot", "ocr", "record", "open_file", "close_file", "stage", "unstage",
         "documents", "log_friction", "friction_log", "workspace", "wait_for",
         "op_log", "log_stats", "set_watch",
     ]
@@ -71,6 +71,26 @@ enum Tools {
             + "(click_label, set_value, press_key, get_accessibility_tree) and typing do work there. "
             + "To drive this app by mouse, it has to be on the current Space — the person can show it, "
             + "or enable watching so the driver may bring it forward. Pass force:true to send it anyway."
+    }
+
+    /// Put the target's window on the driver's own display so the window server
+    /// will route mouse events to it. Returns a note for the reply, or nil if
+    /// staging was not possible.
+    static func autoStage(_ target: inout Target, shared: Shared, helper: Helper, agent: String) -> String? {
+        guard WorkDisplay.shared.ensure(), target.windowId != 0 else { return nil }
+        let size = CGSize(width: target.bounds.w, height: target.bounds.h)
+        let staged = WorkDisplay.shared.stage(windowId: target.windowId, size: size,
+                                              helper: helper, pid: target.pid)
+        guard staged.error == nil else { return nil }
+        let original = Rect(x: target.bounds.x, y: target.bounds.y, w: target.bounds.w, h: target.bounds.h)
+        var fresh = shared.effectiveTarget(for: agent) ?? target
+        fresh.originalFrame = original
+        fresh.bounds = Rect(x: staged.frame.origin.x, y: staged.frame.origin.y,
+                            w: staged.frame.width, h: staged.frame.height)
+        fresh.onScreen = true
+        shared.setTarget(fresh, for: shared.bindingKey(for: agent))
+        target = fresh
+        return " (the window was off the showing Space, so it was staged on the driver's own display to make the click reach it; unstage puts it back)"
     }
 
     static func execute(
@@ -295,7 +315,14 @@ enum Tools {
                 return ActionReport.err("\(error)")
             }
 
-        case "unbind":
+        case "unbind", "unbind_app":
+            // Put a staged window back before letting go of it: leaving an app
+            // parked on the driver's display would be a surprise to the person
+            // who later looks at that app.
+            if let t = shared.effectiveTarget(for: agent), let original = t.originalFrame {
+                _ = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid,
+                                               frame: original.cgRect, helper: helper)
+            }
             // Only this agent's binding goes: another agent may hold the same
             // app, and its worker must survive.
             let released = shared.releaseTarget(for: agent)
@@ -304,6 +331,71 @@ enum Tools {
                 pool.release(id)
             }
             return ActionReport.ok("unbound")
+
+        case "stage":
+            // Give this window a display of its own, so the window server will
+            // route mouse events to it. The person's screen, Space and pointer
+            // are untouched: a virtual display has no physical output.
+            let t: Target
+            do { t = try Session.liveTarget(shared, helper, force: true, agent) }
+            catch { return ActionReport.err("\(error)") }
+            guard t.windowId != 0 else { return ActionReport.err("nothing to stage: no window") }
+            if t.onScreen {
+                return ActionReport.ok("\(t.label) is already on a visible display; no staging needed")
+            }
+            guard WorkDisplay.shared.ensure() else {
+                return ActionReport.err("could not create the driver's work display (\(WorkDisplay.shared.failure ?? "unknown"))")
+            }
+            let size = CGSize(width: t.bounds.w, height: t.bounds.h)
+            let staged = WorkDisplay.shared.stage(windowId: t.windowId, size: size, helper: helper, pid: t.pid)
+            // Verify with the window server rather than the attempt, and give it a
+            // moment: a window that just moved to another display reports
+            // off-screen until the display server has processed the move.
+            var live: Window? = nil
+            if staged.error == nil {
+                for _ in 0..<30 {
+                    live = helper.windowsList().first { $0.windowId == t.windowId }
+                    if live?.onScreen == true { break }
+                    usleep(50_000)
+                }
+                if let live = live, !live.onScreen {
+                    // Put it back rather than leaving the app somewhere odd.
+                    _ = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid,
+                                                   frame: t.bounds.cgRect, helper: helper)
+                    return ActionReport.err("could not stage \(t.label): the window moved but the window server still reports it off screen")
+                }
+            }
+            guard let error = staged.error.map({ $0 }) else {
+                var fresh = shared.effectiveTarget(for: agent) ?? t
+                fresh.originalFrame = Rect(x: t.bounds.x, y: t.bounds.y, w: t.bounds.w, h: t.bounds.h)
+                fresh.bounds = Rect(x: staged.frame.origin.x, y: staged.frame.origin.y,
+                                    w: staged.frame.width, h: staged.frame.height)
+                fresh.onScreen = true
+                shared.setTarget(fresh, for: shared.bindingKey(for: agent))
+                var r = ActionReport.ok("staged \(t.label) on the driver's work display: it is now clickable, and the person's screen is unchanged")
+                r.payload = ["display": Int(WorkDisplay.shared.displayID),
+                             "frame": ["x": staged.frame.origin.x, "y": staged.frame.origin.y,
+                                       "w": staged.frame.width, "h": staged.frame.height],
+                             "original": fresh.originalFrame.map { ["x": $0.x, "y": $0.y, "w": $0.w, "h": $0.h] } ?? [:]]
+                return r
+            }
+            return ActionReport.err("could not stage \(t.label): \(error)")
+
+        case "unstage":
+            let t: Target
+            do { t = try Session.liveTarget(shared, helper, force: false, agent) }
+            catch { return ActionReport.err("\(error)") }
+            guard let original = t.originalFrame else {
+                return ActionReport.ok("\(t.label) was not staged by the driver")
+            }
+            let ok = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid, frame: original.cgRect, helper: helper)
+            var fresh = shared.effectiveTarget(for: agent) ?? t
+            fresh.originalFrame = nil
+            fresh.bounds = original
+            shared.setTarget(fresh, for: shared.bindingKey(for: agent))
+            return ActionReport.ok(ok
+                ? "put \(t.label) back where it was"
+                : "\(t.label) could not be moved back; it is still at its current position")
 
         case "get_window_state", "get_accessibility_tree":
             do {
@@ -662,7 +754,7 @@ enum Tools {
         _ helper: Helper,
         _ agent: String
     ) -> ActionReport {
-        let target: Target
+        var target: Target
         do { target = try Session.liveTarget(shared, helper, force: false, agent) }
         catch { return ActionReport.err("\(error)") }
 
@@ -749,8 +841,16 @@ enum Tools {
                 }
             }
 
-            if mode == .background, !(asBool(obj["force"]) ?? false), let reason = offScreenReason(target, tool) {
-                return ActionReport.err(reason)
+            // Off the showing Space? Give the window a display of its own and
+            // carry on. The person's screen is untouched, and the alternative is
+            // a mouse tool that cannot work for the rest of the session.
+            var stagedNote = ""
+            if mode == .background, !(asBool(obj["force"]) ?? false), !target.onScreen {
+                if let staged = autoStage(&target, shared: shared, helper: helper, agent: agent) {
+                    stagedNote = staged
+                } else if let reason = offScreenReason(target, tool) {
+                    return ActionReport.err(reason)
+                }
             }
             let how: String
             switch tool {

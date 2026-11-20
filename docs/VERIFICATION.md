@@ -436,7 +436,36 @@ driver says exactly that instead of reporting "click delivered" while nothing
 happens. `screenshot` falls back to a ScreenCaptureKit stream, which captures
 windows on other Spaces and Metal-backed canvases that `screencapture` cannot see.
 
-## 23. What is *not* verified
+## 23. The work display: full mouse control without touching the person's screen
+
+The measured limit in section 22 is that mouse events do not reach a window off
+the showing Space. The fix is to give the driver a display of its own.
+
+A virtual display (the private CGVirtualDisplay API that BetterDisplay, DeskPad
+and the headless-agent tools use) is a real display to the window server with no
+physical output. A window moved onto it is ordinary "on screen", so the window
+server routes mouse events to it, and nothing appears on the person's monitor.
+
+Measured end to end, on the machine where the person is working in another Space:
+
+| Step | Result |
+|---|---|
+| Calculator bound while off the showing Space | `on_screen: false`, clicks refused |
+| `stage` | window moves 603,70 → 1532,20, `on_screen: true` |
+| click on the staged window | lands (display shows the digit), `pointer_moved: false`, `focus_changed: false` |
+| raw CAD canvas clicks on a staged window | the drawing changes |
+| `unstage` | window back at 603,70 |
+| person's frontmost app throughout | unchanged (Chrome, then CADCraft, never moved by the driver) |
+
+The daemon creates the display lazily on the first stage, and `QD_WORK_DISPLAY=0`
+turns the feature off. Unbinding a staged app puts it back.
+
+Two things this cost, both found by testing rather than reading: the descriptor's
+vendor/product/serial values decide whether the display activates at all (an
+invented triple was accepted but never came up), and reading a window's frame by
+reusing the move command quietly moved every window it measured to (-1,-1).
+
+## 24. What is *not* verified
 
 Honesty about the edges:
 

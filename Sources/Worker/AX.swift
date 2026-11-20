@@ -834,6 +834,20 @@ func ocrImage(path: String) -> [[String: Any]] {
     return found
 }
 
+/// The CG window id behind an AX window element.
+///
+/// Accessibility has no public way to ask for it; `_AXUIElementGetWindow` is the
+/// accessor macOS itself uses, and every accessibility tool relies on it.
+func axWindowId(_ el: AXUIElement) -> UInt32 {
+    typealias GetWindow = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+    guard let handle = dlopen(nil, RTLD_NOW),
+          let sym = dlsym(handle, "_AXUIElementGetWindow") else { return 0 }
+    let fn = unsafeBitCast(sym, to: GetWindow.self)
+    var wid: CGWindowID = 0
+    guard fn(el, &wid) == .success else { return 0 }
+    return UInt32(wid)
+}
+
 func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
     let wid = req["window_id"] as? Int ?? 0
     let path = req["path"] as? String ?? "/tmp/quiet-driver-window.png"
@@ -1913,6 +1927,73 @@ func handle(_ req: [String: Any]) -> [String: Any] {
             usleep(6_000)
         }
         return ["ok": true, "sent": sent]
+
+    case "window_frame":
+        // Read-only: a frame request must never move anything.
+        let pid = Int32(req["pid"] as? Int ?? 0)
+        let wid = req["window_id"] as? Int ?? 0
+        let ax = appElement(pid)
+        var windows: [AXUIElement] = []
+        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { windows = ws }
+        if let mw = axAttr(ax, "AXMainWindow") { windows.append(mw as! AXUIElement) }
+        var w = windows.first
+        if wid != 0 { for c in windows where Int(axWindowId(c)) == wid { w = c } }
+        guard let win = w else { return ["ok": false, "error": "no window"] }
+        var pt = CGPoint.zero, sz = CGSize.zero
+        var gp: CFTypeRef?, gs: CFTypeRef?
+        AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &gp)
+        AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &gs)
+        if let gp { AXValueGetValue(gp as! AXValue, .cgPoint, &pt) }
+        if let gs { AXValueGetValue(gs as! AXValue, .cgSize, &sz) }
+        return ["ok": true, "x": pt.x, "y": pt.y, "w": sz.width, "h": sz.height]
+
+    case "move_window":
+        // Move and resize a window through accessibility. No activation, no
+        // Space change: the window is simply told where to be. This is how an
+        // agent's app gets onto the driver's own display so it can be clicked.
+        let pid = Int32(req["pid"] as? Int ?? 0)
+        let wid = req["window_id"] as? Int ?? 0
+        guard pid != 0 else { return ["ok": false, "error": "move_window needs a pid"] }
+        let ax = appElement(pid)
+
+        var windows: [AXUIElement] = []
+        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { windows = ws }
+        if let mw = axAttr(ax, "AXMainWindow") { windows.append(mw as! AXUIElement) }
+        guard !windows.isEmpty else { return ["ok": false, "error": "the app exposes no window to move"] }
+
+        // Prefer the window the caller named; fall back to the main window.
+        var target = windows.first
+        if wid != 0 {
+            if wid != 0 { for w in windows where Int(axWindowId(w)) == wid { target = w } }
+        }
+        guard let w = target else { return ["ok": false, "error": "no window"] }
+
+        var point = CGPoint(x: (req["x"] as? Double) ?? 0, y: (req["y"] as? Double) ?? 0)
+        let size = CGSize(width: (req["w"] as? Double) ?? 0, height: (req["h"] as? Double) ?? 0)
+        // Position first, then size: resizing before moving can push the window
+        // off the target display, and macOS clamps positions to real displays.
+        let posRc = AXUIElementSetAttributeValue(w, kAXPositionAttribute as CFString,
+                                                 AXValueCreate(.cgPoint, &point)!)
+        var sizeRc: AXError = .success
+        if size.width > 1, size.height > 1 {
+            var sz = size
+            sizeRc = AXUIElementSetAttributeValue(w, kAXSizeAttribute as CFString,
+                                                  AXValueCreate(.cgSize, &sz)!)
+        }
+        var got = CGRect.zero
+        var gp: CFTypeRef?, gs: CFTypeRef?
+        AXUIElementCopyAttributeValue(w, kAXPositionAttribute as CFString, &gp)
+        AXUIElementCopyAttributeValue(w, kAXSizeAttribute as CFString, &gs)
+        var pt = CGPoint.zero, sz2 = CGSize.zero
+        if let gp { AXValueGetValue(gp as! AXValue, .cgPoint, &pt) }
+        if let gs { AXValueGetValue(gs as! AXValue, .cgSize, &sz2) }
+        got = CGRect(origin: pt, size: sz2)
+        // A window that refuses to resize is still movable, and moving it is what
+        // makes it clickable. Only the position has to work.
+        return ["ok": posRc == .success && got.origin.x.isFinite,
+                "resized": sizeRc == .success,
+                "position_error": Int(posRc.rawValue), "size_error": Int(sizeRc.rawValue),
+                "x": got.origin.x, "y": got.origin.y, "w": got.size.width, "h": got.size.height]
 
     case "make_window_key":
         let pid = Int32(req["pid"] as? Int ?? 0)

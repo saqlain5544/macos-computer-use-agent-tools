@@ -116,9 +116,12 @@ What does not reach it is the mouse: `click`, `mouse_drag` and `scroll` are rout
 by the window server to windows that are showing. The driver refuses those with
 that explanation rather than pretending the click landed.
 
-So: on an off-Space window, work through labels and the keyboard. If you need to
-drag a canvas there, the app has to be brought to the person's Space — which is
-their decision, not yours.
+So: on an off-Space window, work through labels and the keyboard, or call
+`stage`. `stage` moves the window onto a display the driver owns, so the mouse
+works there while the person's screen, focus and pointer stay untouched — use it
+for anything that needs a click or a drag, then `unstage` to put the window back.
+Mouse tools also stage automatically the first time they need to. Screenshots and
+keyboard work either way.
 
 ## Waiting
 

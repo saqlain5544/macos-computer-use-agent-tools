@@ -111,7 +111,17 @@ enum MCP {
             Spec(name: "get_text",
                  description: "Read the bound app's text field.",
                  schema: { obj(["agent": agent], []) }),
-            Spec(name: "ocr",
+            Spec(name: "stage",
+             description: "Move the bound window onto a display the driver owns, so mouse clicks and drags can reach it. Use this when a window is on another Space or otherwise not visible: afterwards click, double_click, mouse_drag and scroll work normally, and the person's screen, focus and pointer are not touched. Screenshots and keyboard already work without it. unstage puts the window back.",
+             schema: {
+                obj(["agent": agent], [])
+             }),
+        Spec(name: "unstage",
+             description: "Put a window staged with stage back where it was.",
+             schema: {
+                obj(["agent": agent], [])
+             }),
+        Spec(name: "ocr",
              description: "Read the text on the bound window, with the position of each line. Use this in apps that draw their own UI (design, CAD, canvas, games) where the accessibility tree has nothing: it tells you the labels you can see and where they are, so you can click them. Coordinates are window-relative and ready to pass to click.",
              schema: {
                 obj(["agent": agent], [])

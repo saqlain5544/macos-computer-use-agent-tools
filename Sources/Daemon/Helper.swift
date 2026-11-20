@@ -362,6 +362,25 @@ extension Helper {
         return (lines, boxes, (v["count"] as? Int) ?? boxes.count)
     }
 
+    /// Move and resize a window through accessibility: no activation, no Space
+    /// change, the window is just told where to be.
+    @discardableResult
+    func moveWindow(windowId: UInt32, pid: Int32,
+                    x: Double, y: Double, w: Double, h: Double) throws -> Bool {
+        let v = try ok(["cmd": "move_window", "pid": Int(pid), "window_id": Int(windowId),
+                        "x": x, "y": y, "w": w, "h": h])
+        return asBool(v["ok"]) ?? false
+    }
+
+    /// Read a window's frame. Never moves it: a frame request must not have
+    /// side effects (the first version of this reused move_window and quietly
+    /// moved every window it measured to (-1,-1)).
+    func windowFrame(windowId: UInt32, pid: Int32) throws -> Rect {
+        let v = try ok(["cmd": "window_frame", "pid": Int(pid), "window_id": Int(windowId)])
+        return Rect(x: asDouble(v["x"]) ?? 0, y: asDouble(v["y"]) ?? 0,
+                    w: asDouble(v["w"]) ?? 0, h: asDouble(v["h"]) ?? 0)
+    }
+
     func screenshot(windowId: UInt32, path: String, native: Bool = false) throws -> (w: Int, h: Int, bytes: Int, scale: Double) {
         let v = try ok(["cmd": "screenshot", "window_id": Int(windowId), "path": path, "native": native])
         return (asInt(v["width"]) ?? 0, asInt(v["height"]) ?? 0, asInt(v["bytes"]) ?? 0,

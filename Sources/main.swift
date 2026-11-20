@@ -148,6 +148,16 @@ if isBridge {
     exit(MCP.bridgeStdio())
 }
 
+// `--probe-display` answers one question: can this process create the work
+// display? It exists because the daemon and a plain test binary can differ.
+if args.contains("--probe-display") {
+    let ok = WorkDisplay.shared.ensure()
+    print("work display: \(ok ? "ok" : "failed") id=\(WorkDisplay.shared.displayID) "
+          + "bounds=\(WorkDisplay.shared.bounds) error=\(WorkDisplay.shared.failure ?? "none")")
+    if ok { sleep(2) }
+    exit(ok ? 0 : 1)
+}
+
 // MARK: - daemon startup
 
 // A viewer never owns the device: it is a window onto whatever daemon is running.
