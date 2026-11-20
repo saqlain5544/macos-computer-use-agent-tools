@@ -1733,13 +1733,33 @@ func handle(_ req: [String: Any]) -> [String: Any] {
             (axAttr(ax, "AXMainWindow").map { axStr($0 as! AXUIElement, "AXTitle") }) ?? ""
         }
 
-        if mainWindowTitle() != target {
+        // Did we have to promote another document to the front? If so the app is
+        // backgrounded and the close button will be ignored, which is a
+        // different failure from "the button did not work".
+        let promoted = mainWindowTitle() != target
+        if promoted {
             _ = pressWindowMenuItem(ax, target)
             // Poll rather than sleep: the window usually becomes key within a
             // few tens of milliseconds, and the fixed wait was 250 ms.
             let deadline = Date().addingTimeInterval(0.5)
             while mainWindowTitle() != target && Date() < deadline {
                 usleep(25_000)
+            }
+            // Still not key: a backgrounded app cannot make another document
+            // key, so the close button belongs to a different window. Say that
+            // now instead of pressing the wrong button and polling for it.
+            // Did we have to promote another document to the front? If so the app is
+        // backgrounded and the close button will be ignored, which is a
+        // different failure from "the button did not work".
+        let promoted = mainWindowTitle() != target
+        if promoted {
+                return [
+                    "ok": false,
+                    "error": "only the document that is in front can be closed while the app is in the background",
+                    "front_document": mainWindowTitle(),
+                    "requested": target,
+                    "hint": "close the front one first, or quit_app to close the whole app",
+                ]
             }
         }
 
@@ -1768,7 +1788,11 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         // tens of milliseconds; the fixed 400 ms wait was most of this call's
         // cost. The loop also notices a save sheet, which blocks the close.
         var sawSheet = false
-        let deadline = Date().addingTimeInterval(0.5)
+        // A promoted document's close button is inert while the app is in the
+        // background: give it a short moment, then explain rather than waiting
+        // out the full deadline for something that cannot happen.
+        let budget = promoted ? 0.15 : 0.5
+        let deadline = Date().addingTimeInterval(budget)
         var after = documentsNow()
         while Date() < deadline {
             if let sheets = axAttr(w, "AXSheets") as? [AXUIElement], !sheets.isEmpty {
@@ -1789,6 +1813,15 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         if !after.contains(target) {
             return ["ok": true, "rc": Int(rc), "closed": target]
+        }
+        if promoted {
+            return [
+                "ok": false,
+                "error": "only the document that is in front can be closed while the app is in the background",
+                "front_document": mainWindowTitle(),
+                "requested": target,
+                "hint": "close the front one first, or quit_app to close the whole app",
+            ]
         }
         return ["ok": false, "error": "the close button was pressed but the document is still open"]
 
