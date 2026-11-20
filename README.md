@@ -173,6 +173,7 @@ Four suites, all runnable locally:
 | `.build/selftest` | 55 checks: window rules, paths, focus honesty, conversions, metrics, surface agreement |
 | `scripts/acceptance.sh` | 27 checks against a real app: bind, drive, focus guard, lifecycle, MCP |
 | `scripts/tool_audit.py` | all 32 tools, asserting an observable effect where one is possible |
+| `scripts/concurrency.py` | two agents on two apps: bindings, ownership races, worker isolation |
 | `perf/harness.py` | latency, memory, CPU, and the two invariants that must never break |
 
 That compiles the self-tests, builds the single binary, and refreshes

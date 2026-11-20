@@ -1,0 +1,397 @@
+{
+  "at": "2026-11-20T14:45:15Z",
+  "valid": true,
+  "quick": false,
+  "bench": {
+    "tool_benchmarks": [
+      {
+        "label": "status",
+        "n": 160,
+        "p50_ms": 0.41,
+        "p90_ms": 0.47,
+        "p99_ms": 0.65,
+        "max_ms": 0.77,
+        "mean_ms": 0.42,
+        "throughput_per_s": 2361.2,
+        "failures": 0,
+        "elapsed_s": 0.07
+      },
+      {
+        "label": "windows",
+        "n": 40,
+        "p50_ms": 2.38,
+        "p90_ms": 3.39,
+        "p99_ms": 5.73,
+        "max_ms": 5.73,
+        "mean_ms": 2.63,
+        "throughput_per_s": 380.0,
+        "failures": 0,
+        "elapsed_s": 0.11
+      },
+      {
+        "label": "click_label",
+        "n": 40,
+        "p50_ms": 2.58,
+        "p90_ms": 4.06,
+        "p99_ms": 16.84,
+        "max_ms": 16.84,
+        "mean_ms": 2.89,
+        "throughput_per_s": 345.5,
+        "failures": 0,
+        "elapsed_s": 0.12
+      },
+      {
+        "label": "click (coordinate)",
+        "n": 40,
+        "p50_ms": 44.03,
+        "p90_ms": 46.25,
+        "p99_ms": 57.76,
+        "max_ms": 57.76,
+        "mean_ms": 44.35,
+        "throughput_per_s": 22.5,
+        "failures": 0,
+        "elapsed_s": 1.77
+      },
+      {
+        "label": "press_key",
+        "n": 40,
+        "p50_ms": 15.63,
+        "p90_ms": 16.44,
+        "p99_ms": 30.46,
+        "max_ms": 30.46,
+        "mean_ms": 15.64,
+        "throughput_per_s": 63.9,
+        "failures": 0,
+        "elapsed_s": 0.63
+      },
+      {
+        "label": "accessibility_tree",
+        "n": 12,
+        "p50_ms": 13.81,
+        "p90_ms": 18.85,
+        "p99_ms": 23.11,
+        "max_ms": 23.11,
+        "mean_ms": 15.16,
+        "throughput_per_s": 66.0,
+        "failures": 0,
+        "elapsed_s": 0.18
+      },
+      {
+        "label": "screenshot",
+        "n": 12,
+        "p50_ms": 75.24,
+        "p90_ms": 80.17,
+        "p99_ms": 105.89,
+        "max_ms": 105.89,
+        "mean_ms": 78.21,
+        "throughput_per_s": 12.8,
+        "failures": 0,
+        "elapsed_s": 0.94
+      },
+      {
+        "label": "mcp tools/list",
+        "n": 40,
+        "p50_ms": 0.5,
+        "p90_ms": 0.56,
+        "p99_ms": 0.62,
+        "max_ms": 0.62,
+        "mean_ms": 0.5,
+        "throughput_per_s": 1979.9,
+        "failures": 0,
+        "elapsed_s": 0.02
+      },
+      {
+        "label": "type_text",
+        "n": 40,
+        "p50_ms": 8.69,
+        "p90_ms": 17.14,
+        "p99_ms": 20.67,
+        "max_ms": 20.67,
+        "mean_ms": 10.77,
+        "throughput_per_s": 92.8,
+        "failures": 0,
+        "elapsed_s": 0.43
+      },
+      {
+        "label": "set_value",
+        "n": 40,
+        "p50_ms": 1.57,
+        "p90_ms": 2.48,
+        "p99_ms": 6.29,
+        "max_ms": 6.29,
+        "mean_ms": 1.76,
+        "throughput_per_s": 567.2,
+        "failures": 0,
+        "elapsed_s": 0.07
+      },
+      {
+        "label": "get_text",
+        "n": 40,
+        "p50_ms": 0.59,
+        "p90_ms": 0.64,
+        "p99_ms": 0.69,
+        "max_ms": 0.69,
+        "mean_ms": 0.57,
+        "throughput_per_s": 1767.4,
+        "failures": 0,
+        "elapsed_s": 0.02
+      }
+    ],
+    "window": {
+      "h": 408,
+      "w": 674,
+      "x": 603,
+      "y": 70
+    }
+  },
+  "footprint": {
+    "actions": 300,
+    "elapsed_s": 2.37,
+    "actions_per_s": 126.8,
+    "daemon_rss_before_mb": 16.3,
+    "daemon_rss_after_mb": 16.3,
+    "daemon_rss_growth_mb": 0.0,
+    "daemon_cpu_seconds": 0.05,
+    "worker_rss_mb": {
+      "56304": 14.7,
+      "56706": 14.9,
+      "56849": 42.2,
+      "56910": 21.0
+    },
+    "worker_count": 4,
+    "focus_transitions": 0,
+    "pointer_moves": 0,
+    "driver_reported_focus_events": 3,
+    "mode": "background",
+    "trace": [
+      {
+        "t": 1795185914.07542,
+        "front": "Agate",
+        "top": "Agate",
+        "pointerMoves": 0
+      }
+    ]
+  },
+  "internal_metrics": {
+    "actions_total": 721,
+    "error_rate": 0,
+    "errors": 0,
+    "measured_calls": 578,
+    "process": {
+      "children": [],
+      "cpu_s": 0,
+      "pid": 56303,
+      "rss_mb": 0,
+      "threads": 0
+    },
+    "slowest": [
+      {
+        "stats": {
+          "count": 13,
+          "errors": 0,
+          "max_ms": 105.43,
+          "mean_ms": 78.78,
+          "p50_ms": 74.77,
+          "p90_ms": 91.08,
+          "p99_ms": 105.43
+        },
+        "tool": "screenshot"
+      },
+      {
+        "stats": {
+          "count": 1,
+          "errors": 0,
+          "max_ms": 69.23,
+          "mean_ms": 69.23,
+          "p50_ms": 69.23,
+          "p90_ms": 69.23,
+          "p99_ms": 69.23
+        },
+        "tool": "launch_app"
+      },
+      {
+        "stats": {
+          "count": 1,
+          "errors": 0,
+          "max_ms": 64.56,
+          "mean_ms": 64.56,
+          "p50_ms": 64.56,
+          "p90_ms": 64.56,
+          "p99_ms": 64.56
+        },
+        "tool": "open_file"
+      },
+      {
+        "stats": {
+          "count": 41,
+          "errors": 0,
+          "max_ms": 57.19,
+          "mean_ms": 44.02,
+          "p50_ms": 43.42,
+          "p90_ms": 45.74,
+          "p99_ms": 57.19
+        },
+        "tool": "click"
+      },
+      {
+        "stats": {
+          "count": 3,
+          "errors": 0,
+          "max_ms": 56.08,
+          "mean_ms": 37.88,
+          "p50_ms": 41.41,
+          "p90_ms": 56.08,
+          "p99_ms": 56.08
+        },
+        "tool": "bind_app"
+      },
+      {
+        "stats": {
+          "count": 41,
+          "errors": 0,
+          "max_ms": 29.88,
+          "mean_ms": 15.12,
+          "p50_ms": 15.11,
+          "p90_ms": 15.36,
+          "p99_ms": 29.88
+        },
+        "tool": "press_key"
+      },
+      {
+        "stats": {
+          "count": 13,
+          "errors": 0,
+          "max_ms": 21.1,
+          "mean_ms": 14.2,
+          "p50_ms": 12.37,
+          "p90_ms": 18.68,
+          "p99_ms": 21.1
+        },
+        "tool": "get_accessibility_tree"
+      },
+      {
+        "stats": {
+          "count": 41,
+          "errors": 0,
+          "max_ms": 18.9,
+          "mean_ms": 10.06,
+          "p50_ms": 7.76,
+          "p90_ms": 15.35,
+          "p99_ms": 18.9
+        },
+        "tool": "type_text"
+      }
+    ],
+    "tools": {
+      "bind_app": {
+        "count": 3,
+        "errors": 0,
+        "max_ms": 56.08,
+        "mean_ms": 37.88,
+        "p50_ms": 41.41,
+        "p90_ms": 56.08,
+        "p99_ms": 56.08
+      },
+      "click": {
+        "count": 41,
+        "errors": 0,
+        "max_ms": 57.19,
+        "mean_ms": 44.02,
+        "p50_ms": 43.42,
+        "p90_ms": 45.74,
+        "p99_ms": 57.19
+      },
+      "click_label": {
+        "count": 341,
+        "errors": 0,
+        "max_ms": 68.08,
+        "mean_ms": 2.22,
+        "p50_ms": 1.77,
+        "p90_ms": 2.52,
+        "p99_ms": 16.37
+      },
+      "get_accessibility_tree": {
+        "count": 13,
+        "errors": 0,
+        "max_ms": 21.1,
+        "mean_ms": 14.2,
+        "p50_ms": 12.37,
+        "p90_ms": 18.68,
+        "p99_ms": 21.1
+      },
+      "get_text": {
+        "count": 41,
+        "errors": 0,
+        "max_ms": 0.37,
+        "mean_ms": 0.27,
+        "p50_ms": 0.29,
+        "p90_ms": 0.33,
+        "p99_ms": 0.37
+      },
+      "launch_app": {
+        "count": 1,
+        "errors": 0,
+        "max_ms": 69.23,
+        "mean_ms": 69.23,
+        "p50_ms": 69.23,
+        "p90_ms": 69.23,
+        "p99_ms": 69.23
+      },
+      "open_file": {
+        "count": 1,
+        "errors": 0,
+        "max_ms": 64.56,
+        "mean_ms": 64.56,
+        "p50_ms": 64.56,
+        "p90_ms": 64.56,
+        "p99_ms": 64.56
+      },
+      "press_key": {
+        "count": 41,
+        "errors": 0,
+        "max_ms": 29.88,
+        "mean_ms": 15.12,
+        "p50_ms": 15.11,
+        "p90_ms": 15.36,
+        "p99_ms": 29.88
+      },
+      "screenshot": {
+        "count": 13,
+        "errors": 0,
+        "max_ms": 105.43,
+        "mean_ms": 78.78,
+        "p50_ms": 74.77,
+        "p90_ms": 91.08,
+        "p99_ms": 105.43
+      },
+      "set_mode": {
+        "count": 1,
+        "errors": 0,
+        "max_ms": 0,
+        "mean_ms": 0,
+        "p50_ms": 0,
+        "p90_ms": 0,
+        "p99_ms": 0
+      },
+      "set_value": {
+        "count": 41,
+        "errors": 0,
+        "max_ms": 5.93,
+        "mean_ms": 1.39,
+        "p50_ms": 1.21,
+        "p90_ms": 2,
+        "p99_ms": 5.93
+      },
+      "type_text": {
+        "count": 41,
+        "errors": 0,
+        "max_ms": 18.9,
+        "mean_ms": 10.06,
+        "p50_ms": 7.76,
+        "p90_ms": 15.35,
+        "p99_ms": 18.9
+      }
+    },
+    "uptime_seconds": 58
+  }
+}

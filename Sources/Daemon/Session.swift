@@ -10,7 +10,13 @@ final class Shared {
 
     private var _running = true
     private var _mode: Mode = .background
-    private var _target: Target?
+    /// One binding per agent. Two agents on two apps must not clobber each
+    /// other, which is exactly what a single session-wide binding did.
+    private var _targets: [String: Target] = [:]
+    /// The most recently bound agent. An agent-less client (a curl, a simple
+    /// script, the dashboard) means "the app I am working with", which is the
+    /// last one bound rather than whatever happens to be at a fixed key.
+    private var _lastBound: String?
     private var _port: UInt16 = 0
     private var _fps: Double = 0
     private var _frames: UInt64 = 0
@@ -39,9 +45,90 @@ final class Shared {
         set { locked { _mode = newValue } }
     }
 
+    /// The default agent's binding. Tools never use this: they pass their own
+    /// agent id, because an agent's binding is its own.
     var target: Target? {
-        get { locked { _target } }
-        set { locked { _target = newValue } }
+        get { locked { _targets["default"] } }
+        set { locked { _targets["default"] = newValue } }
+    }
+
+    func target(for agent: String) -> Target? {
+        let key = agent.isEmpty ? "default" : agent
+        return locked { _targets[key] }
+    }
+
+    /// The binding a call should act on.
+    ///
+    /// Exact match first. If the caller named no agent (or an agent that has not
+    /// bound anything) and exactly one binding exists, use it: that is what a
+    /// single-agent client means, and it is what every simple HTTP call looks
+    /// like. With two bindings there is no safe guess, so the answer is nothing.
+    func effectiveTarget(for agent: String) -> Target? {
+        let key = agent.isEmpty ? "default" : agent
+        // "default" is what an unnamed caller becomes, so it counts as unnamed.
+        let unnamed = agent.isEmpty || key == "default"
+        return locked {
+            if let t = _targets[key] { return t }
+            // A caller that names nobody gets the app most recently bound; that
+            // is the one it means. With an explicit agent there is no guess.
+            if unnamed, let last = _lastBound { return _targets[last] }
+            return nil
+        }
+    }
+
+    func setTarget(_ target: Target?, for agent: String) {
+        let key = agent.isEmpty ? "default" : agent
+        locked {
+            if let t = target {
+                _targets[key] = t
+                _lastBound = key
+            } else {
+                _targets.removeValue(forKey: key)
+                if _lastBound == key { _lastBound = _targets.keys.sorted().first }
+            }
+        }
+    }
+
+    /// Every binding, as data for /status and the dashboard.
+    var bindings: [[String: Any]] {
+        locked {
+            _targets.map { agent, t in
+                var row = t.json
+                row["agent"] = agent
+                return row
+            }.sorted { ($0["agent"] as? String ?? "") < ($1["agent"] as? String ?? "") }
+        }
+    }
+
+    /// The key a call should write its refreshed binding back to: the caller's
+    /// own if it has one, otherwise the single binding it fell back to.
+    func bindingKey(for agent: String) -> String {
+        let key = agent.isEmpty ? "default" : agent
+        let unnamed = agent.isEmpty || key == "default"
+        return locked {
+            if _targets[key] != nil { return key }
+            if unnamed, let last = _lastBound { return last }
+            return key
+        }
+    }
+
+    /// Does any agent other than `agent` hold this app?
+    func owner(ofIdentity identity: String, excluding agent: String) -> String? {
+        let key = agent.isEmpty ? "default" : agent
+        return locked {
+            _targets.first { $0.key != key && $0.value.identity == identity }?.key
+        }
+    }
+
+    /// Drop a binding and report the app whose worker can now be released, if no
+    /// other agent still holds it.
+    func releaseTarget(for agent: String) -> String? {
+        let key = agent.isEmpty ? "default" : agent
+        return locked {
+            guard let removed = _targets.removeValue(forKey: key) else { return nil }
+            let stillHeld = _targets.values.contains { $0.identity == removed.identity }
+            return stillHeld ? nil : removed.identity
+        }
     }
 
     var port: UInt16 {
@@ -135,7 +222,12 @@ final class Shared {
             [
                 "running": _running,
                 "mode": _mode.rawValue,
-                "target": _target?.json ?? NSNull(),
+                "target": _targets["default"]?.json ?? NSNull(),
+                "bindings": _targets.map { agent, t -> [String: Any] in
+                    var row = t.json
+                    row["agent"] = agent
+                    return row
+                }.sorted { ($0["agent"] as? String ?? "") < ($1["agent"] as? String ?? "") },
                 "port": Int(_port),
                 "fps": _fps,
                 "frames": Int(_frames),
@@ -174,8 +266,8 @@ enum SessionError: Error, CustomStringConvertible {
 enum Session {
     static let boundsRefreshMs: UInt64 = 250
 
-    static func currentTarget(_ shared: Shared) throws -> Target {
-        guard let t = shared.target, t.pid != 0 || !t.identity.isEmpty else {
+    static func currentTarget(_ shared: Shared, _ agent: String = "default") throws -> Target {
+        guard let t = shared.effectiveTarget(for: agent), t.pid != 0 || !t.identity.isEmpty else {
             throw SessionError.failed("no app is bound yet — run {\"tool\":\"bind_app\",\"app\":\"<name>\"} first (GET /windows lists them)")
         }
         return t
@@ -284,17 +376,23 @@ enum Session {
             identity = resolved.bundleId
         }
 
-        if let existing = shared.target, existing.identity == identity,
-           existing.owner != owner, !owner.isEmpty, !takeover {
-            throw SessionError.failed(
-                "\(existing.label) is already bound by \"\(existing.owner)\"; pass takeover:true to take it over")
+        // Ownership is per app across agents: binding an app someone else holds
+        // is refused unless the caller takes it over, and taking it over means
+        // the other agent's binding is dropped.
+        if let holder = shared.owner(ofIdentity: identity, excluding: owner) {
+            if !takeover {
+                let label = shared.target(for: holder)?.label ?? identity
+                throw SessionError.failed(
+                    "\(label) is already bound by \"\(holder)\"; pass takeover:true to take it over")
+            }
+            shared.setTarget(nil, for: holder)
         }
 
         let target = Target(
             pid: pid, identity: identity, appName: win.owner, windowId: win.windowId,
             windowTitle: win.title, bounds: win.bounds, owner: owner)
 
-        shared.target = target
+        shared.setTarget(target, for: owner)
         shared.noteAgent(owner)
         shared.tree = (try? helper.tree(pid: pid, max: 400)) ?? []
         shared.record(tool: "bind", detail: "bound to \(win.label)", ok: true, mode: shared.mode, focusChanged: false)
@@ -307,8 +405,9 @@ enum Session {
 
     /// Re-resolve the bound app after it was quit and relaunched: same identity,
     /// new pid and window. Also refreshes the window rectangle.
-    static func rebind(_ helper: Helper, _ shared: Shared) throws -> Target {
-        guard let current = shared.target else {
+    static func rebind(_ helper: Helper, _ shared: Shared, _ agent: String = "default") throws -> Target {
+        let key = shared.bindingKey(for: agent)
+        guard let current = shared.effectiveTarget(for: agent) else {
             throw SessionError.failed("nothing to rebind")
         }
         let name = current.appName
@@ -338,7 +437,7 @@ enum Session {
         let updated = Target(
             pid: pid, identity: current.identity, appName: win.owner,
             windowId: win.windowId, windowTitle: win.title, bounds: win.bounds, owner: current.owner)
-        shared.target = updated
+        shared.setTarget(updated, for: agent)
         shared.boundsRefreshedAt = 0
         return updated
     }
@@ -348,8 +447,10 @@ enum Session {
     /// A closed window can linger in the window server's list for a moment, so a
     /// plain rebind happily hands back the same dead id and a capture fails
     /// again. Excluding the window that just failed is what breaks that loop.
-    static func rebindExcluding(_ shared: Shared, _ helper: Helper, badWindowId: UInt32) -> Target? {
-        guard let current = shared.target else { return nil }
+    static func rebindExcluding(_ shared: Shared, _ helper: Helper, badWindowId: UInt32,
+                                _ agent: String = "default") -> Target? {
+        let key = shared.bindingKey(for: agent)
+        guard let current = shared.effectiveTarget(for: agent) else { return nil }
         let pid: Int32
         if let resolved = try? helper.resolve(current.identity) {
             pid = resolved.pid
@@ -366,14 +467,15 @@ enum Session {
         let updated = Target(pid: pid, identity: current.identity, appName: win.owner,
                              windowId: win.windowId, windowTitle: win.title,
                              bounds: win.bounds, owner: current.owner)
-        shared.target = updated
+        shared.setTarget(updated, for: key)
         shared.boundsRefreshedAt = 0
         return updated
     }
 
     /// The bound target, refreshed and verified live.
-    static func liveTarget(_ shared: Shared, _ helper: Helper, force: Bool) throws -> Target {
-        var target = try currentTarget(shared)
+    static func liveTarget(_ shared: Shared, _ helper: Helper, force: Bool,
+                           _ agent: String = "default") throws -> Target {
+        var target = try currentTarget(shared, agent)
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         let due = force || nowMs &- min(nowMs, shared.boundsRefreshedAt) >= boundsRefreshMs
         if target.pid != 0 && !due { return target }
@@ -383,15 +485,15 @@ enum Session {
             target.windowId = win.windowId
             target.windowTitle = win.title
             shared.boundsRefreshedAt = nowMs
-            var fresh = shared.target ?? target
+            var fresh = shared.effectiveTarget(for: agent) ?? target
             fresh.bounds = win.bounds
             fresh.windowId = win.windowId
             fresh.windowTitle = win.title
-            shared.target = fresh
+            shared.setTarget(fresh, for: shared.bindingKey(for: agent))
             return target
         }
         do {
-            target = try rebind(helper, shared)
+            target = try rebind(helper, shared, agent)
         } catch {
             let appRunning = (try? helper.resolve(target.identity)) != nil
                 || (try? helper.resolve(target.appName)) != nil

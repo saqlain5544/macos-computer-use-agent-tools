@@ -84,6 +84,29 @@ The driver never calls `CGWarpMouseCursorPosition`, `CGEvent.post(tap:)`, or
 guarantee, and it is checkable: sample the pointer and the frontmost app at
 20 Hz while the agent works.
 
+## Bindings are per agent
+
+The first version kept one binding for the whole session. Two agents that bound
+two apps took the app from each other, and the second bind silently moved the
+first agent's work onto the second app — the allocation was session-wide while
+the isolation was per app, which is the worst of both.
+
+A binding now belongs to the agent that made it:
+
+- `bind_app(agent: "builder", app: "Calculator")` and
+  `bind_app(agent: "reviewer", app: "TextEdit")` coexist.
+- A call acts on that agent's app. Another agent's app is invisible to it.
+- Ownership is still per app: binding an app another agent holds is refused
+  unless the caller passes `takeover: true`, which drops the other agent's
+  binding.
+- A caller that names no agent gets the app bound most recently, which is what a
+  single-agent client means by "the app I am working with".
+
+This is what makes the worker-per-app design pay off. Measured on a recording
+that occupied TextEdit's worker for two seconds, a call to Calculator's worker
+took **20-41 ms**; with one session-wide binding it took **2081 ms**, because
+both agents were talking to the same worker without knowing it.
+
 ## The binding
 
 A binding is more than a pid.

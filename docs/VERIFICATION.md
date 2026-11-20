@@ -340,7 +340,35 @@ outside Int's range. The signature is hex text now, every number that crosses
 the worker boundary goes through a non-trapping converter, and the self-tests
 assert that a huge number is refused rather than fatal.
 
-## 18. What is *not* verified
+## 18. Two agents, two apps
+
+`scripts/concurrency.py` checks the claim that each bound app gets its own
+worker rather than trusting the description of the design.
+
+**Isolation.** A recording occupies TextEdit's worker for two seconds; calls to
+Calculator's worker are timed throughout.
+
+| | worst call on the other app |
+|---|---|
+| one session-wide binding (before) | **2081 ms** — the two agents were talking to the same worker |
+| per-agent bindings (after) | **20-41 ms** |
+
+The first number is why the binding model changed. The allocation was per app
+and the isolation was per app, but the *binding* was per session, so both agents
+were silently driving the same app's worker.
+
+**No cross-delivery.** Two agents type digits into their own apps at the same
+time; both sets of keystrokes land in the right app.
+
+**Ownership under contention.** Four agents race to bind a free app; exactly one
+wins and the other three are told who holds it.
+
+**No focus.** Both invariants hold across all of it: zero focus moves, zero
+pointer moves.
+
+Run it with `./scripts/concurrency.py`; it takes about ten seconds.
+
+## 19. What is *not* verified
 
 Honesty about the edges:
 

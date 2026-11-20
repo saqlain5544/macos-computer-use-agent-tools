@@ -161,6 +161,23 @@ case-insensitive and word-subset matching have all missed: `+` finds "Add", `=`
 finds "Equals", `×` finds "Multiply", and so on. A real label always wins, so
 the table can never override what the app itself says.
 
+### One binding for the whole session
+
+**What happened.** Two agents bound two different apps. The second bind took the
+session's single binding, so the first agent's next call silently acted on the
+second app. Nothing errored; the work just landed in the wrong place. The
+concurrency test found it as a stall: while one agent recorded, the other agent's
+calls took two seconds instead of twenty milliseconds, because both were talking
+to the same worker.
+
+**Why it matters.** The project's claim is that agents can work on different
+apps without interfering. A session-wide binding quietly breaks that, and it
+breaks it in the worst way: the call succeeds against the wrong app.
+
+**What the driver does now.** A binding belongs to the agent that made it.
+Ownership is still per app, `takeover` still moves it, and a caller that names no
+agent gets the most recently bound app.
+
 ## Logged by agents
 
 These came from `log_friction` during development, verbatim. The live

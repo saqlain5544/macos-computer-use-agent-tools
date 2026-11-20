@@ -1,3 +1,12 @@
+---
+name: quiet-driver
+description: "Use when driving, controlling, screenshotting, or testing a macOS app with the Quiet Driver MCP tools, or when the agent needs to work in an app without disturbing the person using the computer."
+metadata:
+  origin: "skill_stage_create"
+  stagedAt: "2026-11-20T01:34:52.833Z"
+  reason: "The agent needs the protocol to drive apps without disturbing the user: bind-first, window-relative coordinates, background vs focused modes, ownership rules, artefact workspaces, and the friction lo…"
+---
+
 # Quiet Driver — background computer use on macOS
 
 Drive a real macOS app without disturbing the person using the computer. The
@@ -47,42 +56,37 @@ Each agent has a workspace, `/tmp/quiet-driver/agent-<id>/`, where these land.
 Pass `path` to save anywhere else. The MCP reply returns the image inline, so
 you can look at it directly.
 
-## Opening and closing files
+## Working with an app that has a file dialog
 
-Do **not** open a file by clicking File → Open. That shows a modal panel that
-takes focus away from the person, and on macOS 15 the panel does not respond to
-accessibility actions — so it cannot be driven back to a clean state.
+Opening a file usually shows a panel that takes focus away from the person.
+Before you fight with it, try the cheaper routes:
 
-Use the file tools instead. They work entirely in the background:
+1. **The app's own scripting** — `open -a TextEdit /path/to/file` opens a
+   document with no dialog at all.
+2. **AX directly** — the file list inside the panel is reachable through the
+   accessibility tree.
+3. **The dialog route** — the `file_dialog` tool inspects and drives an open or
+   save panel.
+
+If a dialog is genuinely unavoidable, say so rather than silently stealing
+focus. A `focused` action around it is honest and reversible.
+
+## Two agents, two apps
+
+Your binding is yours. Pass the same `agent` id to `bind_app` and to every later
+call, and the driver keeps you on your app even while another agent works on a
+different one. Agents on different apps get separate workers, so a slow call on
+one does not delay the other.
+
+Two agents cannot hold the *same* app: the second bind is refused with the name
+of the agent that holds it. To take it anyway, pass `takeover: true` — and know
+that the other agent's binding is dropped, so it should re-bind before acting.
 
 ```
-open_file  { path: "/path/to/file" }     # opens it, no panel, no focus change
-documents  { }                            # what the app has open
-close_file { name: "file.txt" }           # closes that document, app keeps running
+bind_app { app: "Calculator", agent: "builder" }
+bind_app { app: "TextEdit",   agent: "reviewer" }   // both fine, different apps
+bind_app { app: "Calculator", agent: "reviewer" }   // refused: held by "builder"
 ```
-
-`open_file` is `open -g`: the document appears in the app and the person's
-frontmost app does not change. `close_file` presses the document window's own
-close button and verifies the document is gone before reporting success. If the
-document has unsaved changes it reports that it is asking, rather than guessing.
-
-If you ever do find a panel open, cancel it with the app — do not leave it
-there for the next agent.
-
-## When two agents want the same app
-
-A second `bind_app` for an app another agent owns is **refused**, with the
-owner's name in the message. Two agents driving one app would race — one
-closing what the other just opened.
-
-Your options:
-
-- **Wait.** The other agent finishes and unbinds; bind again.
-- **Take over** with `"takeover": true`, if you know the other agent is done.
-- **Use another instance.** If the app supports it (Chrome with a separate
-  profile, a second Simulator device, `open -n -a App`), launch one with
-  `launch_app` and bind to that instead. Each instance has its own pid, so
-  each agent can own one.
 
 ## Lifecycle is yours
 
@@ -124,7 +128,7 @@ week.
 log_friction {
   problem: "click_label could not find the Save button in a sheet",
   detail: "the sheet's buttons have no AXTitle, only AXDescription",
-  tool: "click_label"
+  source_tool: "click_label"
 }
 ```
 
@@ -155,14 +159,11 @@ Read the collected backlog with `friction_log`.
 | `set_caret` | `location?`, `length?` | `location` 0 = start, 1 = end |
 | `click_label` | `label` | exact, then case-insensitive, then unique word subset, then symbol aliases (`+` finds "Add") |
 | `get_text` | | the bound app's text field |
-| `open_file` | `path`, `app?` | open a document with no panel, no focus change |
-| `documents` | | the documents the app has open |
-| `close_file` | `name?` | close one document, leaving the app running |
 | `screenshot` | `path?`, `agent?` | PNG of the bound window |
 | `wait_for` | `kind`, `label?`/`text?`/`name?`, `timeout_ms?` | wait instead of polling: `label`, `text`, `document`, `window`, `change` |
 | `record` | `seconds?`, `path?`, `agent?` | .mov of the bound window |
 | `set_mode` | `mode` | `background` or `focused` |
-| `log_friction` | `problem`, `detail?`, `tool?`, `agent?` | |
+| `log_friction` | `problem`, `detail?`, `source_tool?`, `agent?` | |
 | `friction_log` | `limit?` | read the backlog |
 | `workspace` | `agent?` | your directory and its contents |
 | `status` | | target, owner, mode, permissions, focus counters, recent actions |

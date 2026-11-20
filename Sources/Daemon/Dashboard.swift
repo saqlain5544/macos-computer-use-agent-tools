@@ -23,9 +23,20 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Quiet Driver")
                     .font(.system(size: 22, weight: .semibold))
-                Text(model.targetLabel)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                if model.bindings.count > 1 {
+                    ForEach(Array(model.bindings.enumerated()), id: \.offset) { _, row in
+                        HStack(spacing: 6) {
+                            Text(row.agent)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Text(row.label).font(.system(size: 12))
+                        }
+                    }
+                } else {
+                    Text(model.targetLabel)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
@@ -171,6 +182,7 @@ final class DashboardModel: ObservableObject {
     @Published var focusMoved = 0
     @Published var pointerMoved = 0
     @Published var agentCount = 0
+    @Published var bindings: [(agent: String, label: String)] = []
     @Published var ax = false
     @Published var postEvents = false
     @Published var capture = false
@@ -225,6 +237,10 @@ final class DashboardModel: ObservableObject {
             targetLabel = label
         } else {
             targetLabel = "nothing bound"
+        }
+        if let rows = snap["bindings"] as? [[String: Any]] {
+            bindings = rows.map { (agent: ($0["agent"] as? String) ?? "",
+                                   label: ($0["label"] as? String) ?? "") }
         }
         mode = (snap["mode"] as? String) ?? "background"
         actionsTotal = (snap["actions_total"] as? Int) ?? 0

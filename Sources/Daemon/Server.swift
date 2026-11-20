@@ -187,7 +187,7 @@ final class Server {
         }
         let (path, query) = splitTarget(target)
         let (status, reply) = route(method: method, path: path, query: query, body: body,
-                                    hasOrigin: hasOrigin)
+                                    hasOrigin: hasOrigin, agent: "default")
         writeResponse(fd, status: status, body: reply)
     }
 
@@ -229,8 +229,10 @@ final class Server {
 
     // MARK: routing
 
-    func route(method: String, path: String, query: String, body: String, hasOrigin: Bool) -> (Int, String) {
+    func route(method: String, path: String, query: String, body: String, hasOrigin: Bool,
+               agent: String = "default") -> (Int, String) {
         let helper = Tools.boundHelper(shared, pool)
+
 
         if hasOrigin {
             return (403, jsonString([
@@ -251,7 +253,7 @@ final class Server {
             ]))
 
         case ("GET", "/status"), ("GET", "/observe"):
-            return (200, statusJSON())
+            return (200, statusJSON(agent: queryAgent(query)))
 
         case ("GET", "/windows"):
             let list = helper.windowsList().filter { $0.layer == 0 }
@@ -264,7 +266,7 @@ final class Server {
             ]))
 
         case ("GET", "/tree"):
-            guard let t = shared.target else {
+            guard let t = shared.effectiveTarget(for: queryAgent(query)) else {
                 return (200, jsonString(["ok": false, "error": "no app is bound yet"]))
             }
             let nodes = ((try? helper.tree(pid: t.pid, max: 800)) ?? []).filter { $0.worthShowing }
@@ -353,14 +355,15 @@ final class Server {
         }
 
         let started = Date()
+        let agent = agentId(obj)
         let report = Tools.execute(tool: tool, args: obj, callMode: callMode,
-                                   shared: shared, pool: pool, mode: mode)
+                                   shared: shared, pool: pool, mode: mode, agent: agent)
         let micros = Date().timeIntervalSince(started) * 1_000_000
         metrics.record(tool, micros: micros, ok: report.ok)
 
         var final = report
         final.mode = callMode?.rawValue ?? shared.mode.rawValue
-        final.targetLabel = shared.target?.label ?? ""
+        final.targetLabel = shared.target(for: agent)?.label ?? ""
         shared.actionsTotal += 1
         if !final.ok {
             shared.lastError = final.error
@@ -374,8 +377,20 @@ final class Server {
         return final
     }
 
-    private func statusJSON() -> String {
+    /// `?agent=` lets a viewer or a client name whose binding it wants to see.
+    private func queryAgent(_ query: String) -> String {
+        for pair in query.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            if parts.count == 2, parts[0] == "agent" {
+                return String(parts[1]).removingPercentEncoding ?? String(parts[1])
+            }
+        }
+        return "default"
+    }
+
+    private func statusJSON(agent: String = "default") -> String {
         var snap = shared.snapshot
+        snap["target"] = shared.effectiveTarget(for: agent)?.json ?? NSNull()
         snap["ok"] = true
         snap["permissions"] = shared.permissions.json
         snap["uptime_seconds"] = Int(shared.uptime)

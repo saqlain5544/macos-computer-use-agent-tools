@@ -36,8 +36,8 @@ enum Tools {
     /// The worker for whatever is currently bound, or the session worker when
     /// nothing is. Called once per request, so a rebind between actions is
     /// picked up without extra bookkeeping.
-    static func boundHelper(_ shared: Shared, _ pool: WorkerPool) -> Helper {
-        if let t = shared.target, !t.identity.isEmpty { return pool.forApp(t.identity) }
+    static func boundHelper(_ shared: Shared, _ pool: WorkerPool, _ agent: String = "default") -> Helper {
+        if let t = shared.effectiveTarget(for: agent), !t.identity.isEmpty { return pool.forApp(t.identity) }
         return pool.session()
     }
 
@@ -63,10 +63,12 @@ enum Tools {
         callMode: Mode?,
         shared: Shared,
         pool: WorkerPool,
-        mode: Mode
+        mode: Mode,
+        agent: String = "default"
     ) -> ActionReport {
-        let helper = boundHelper(shared, pool)
-        return run(tool: tool, args: args, mode: mode, shared: shared, helper: helper, pool: pool)
+        let helper = boundHelper(shared, pool, agent)
+        return run(tool: tool, args: args, mode: mode, shared: shared, helper: helper,
+                   pool: pool, agent: agent)
     }
 
     // MARK: dispatcher
@@ -77,7 +79,8 @@ enum Tools {
         mode: Mode,
         shared: Shared,
         helper: Helper,
-        pool: WorkerPool
+        pool: WorkerPool,
+        agent: String = "default"
     ) -> ActionReport {
         guard names.contains(tool) else {
             return ActionReport.err(
@@ -86,9 +89,9 @@ enum Tools {
         var report: ActionReport
 
         if sessionTools.contains(tool) {
-            report = sessionAndArtifactTool(tool, obj, shared, helper, pool)
+            report = sessionAndArtifactTool(tool, obj, shared, helper, pool, agent)
         } else {
-            report = actingTool(tool, obj, mode, shared, helper)
+            report = actingTool(tool, obj, mode, shared, helper, agent)
         }
         return report
     }
@@ -104,7 +107,8 @@ enum Tools {
         _ obj: [String: Any],
         _ shared: Shared,
         _ helper: Helper,
-        _ pool: WorkerPool
+        _ pool: WorkerPool,
+        _ agent: String
     ) -> ActionReport {
         switch tool {
         case "show_dashboard":
@@ -141,12 +145,13 @@ enum Tools {
             // Reading state never needs a binding: an agent asks for status
             // before it has bound anything, and over MCP that is usually the
             // first call it makes.
-            let snap = shared.snapshot
-            let label = (snap["target"] as? [String: Any])?["label"] as? String
-            var r = ActionReport.ok("\(label ?? "nothing bound") · mode \(shared.mode.rawValue) · \(shared.actionsTotal) actions")
-            var payload = snap
-            payload["frontmost"] = shared.frontmost
-            r.payload = payload
+            var snap = shared.snapshot
+            let mine = shared.effectiveTarget(for: agent)
+            snap["target"] = mine?.json ?? NSNull()
+            snap["bindings"] = shared.bindings
+            var r = ActionReport.ok("\(mine?.label ?? "nothing bound") · mode \(shared.mode.rawValue) · \(shared.actionsTotal) actions")
+            snap["frontmost"] = shared.frontmost
+            r.payload = snap
             return r
 
         case "list_windows", "get_desktop_state":
@@ -167,7 +172,7 @@ enum Tools {
             if selector.isEmpty, let n = asInt(obj["pid"]) { selector = String(n) }
             if selector.isEmpty { selector = textOf(obj) }
             let window = asInt(obj["window_id"]).flatMap { UInt32(exactly: $0) }
-            let owner = asString(obj["agent"]) ?? "default"
+            let owner = agent.isEmpty ? "default" : agent
             let takeover = asBool(obj["takeover"]) ?? false
             let previous = shared.target?.identity
             do {
@@ -187,7 +192,7 @@ enum Tools {
 
         case "rebind":
             do {
-                let t = try Session.rebind(helper, shared)
+                let t = try Session.rebind(helper, shared, agent)
                 var r = ActionReport.ok("re-bound to \(t.label) (pid \(t.pid))")
                 r.payload = t.json
                 return r
@@ -210,38 +215,39 @@ enum Tools {
         case "quit_app":
             let name = asString(obj["app"]) ?? asString(obj["bundle_id"]) ?? ""
             if name.isEmpty { return ActionReport.err("quit_app needs an \"app\" name or bundle id") }
-            let wasBound = shared.target.map {
+            let wasBound = shared.effectiveTarget(for: agent).map {
                 $0.identity.caseInsensitiveCompare(name) == .orderedSame
                     || $0.appName.caseInsensitiveCompare(name) == .orderedSame
             } ?? false
             let force = asBool(obj["force"]) ?? false
             do {
                 let n = try helper.quitApp(name, force: force)
-                if wasBound, var t = shared.target {
+                if wasBound, var t = shared.effectiveTarget(for: agent) {
                     t.pid = 0
                     t.windowId = 0
-                    shared.target = t
+                    shared.setTarget(t, for: shared.bindingKey(for: agent))
                 }
                 return ActionReport.ok("quit \(n)")
             } catch {
-                if wasBound, var t = shared.target {
+                if wasBound, var t = shared.effectiveTarget(for: agent) {
                     t.pid = 0
                     t.windowId = 0
-                    shared.target = t
+                    shared.setTarget(t, for: shared.bindingKey(for: agent))
                 }
                 return ActionReport.err("\(error)")
             }
 
         case "unbind":
-            let identity = shared.target?.identity
-            shared.target = nil
+            // Only this agent's binding goes: another agent may hold the same
+            // app, and its worker must survive.
+            let released = shared.releaseTarget(for: agent)
             shared.tree = []
-            if let id = identity { pool.release(id) }
+            if let id = released { pool.release(id) }
             return ActionReport.ok("unbound")
 
         case "get_window_state", "get_accessibility_tree":
             do {
-                let t = try Session.currentTarget(shared)
+                let t = try Session.currentTarget(shared, agent)
                 let nodes = ((try? helper.tree(pid: t.pid, max: 800)) ?? []).filter { $0.worthShowing }
                 shared.tree = nodes
                 var r = ActionReport.ok("\(nodes.count) accessibility nodes from \(t.label)")
@@ -253,7 +259,7 @@ enum Tools {
 
         case "screenshot":
             let t: Target
-            do { t = try Session.liveTarget(shared, helper, force: true) }
+            do { t = try Session.liveTarget(shared, helper, force: true, agent) }
             catch { return ActionReport.err("\(error)") }
             let agent = agentId(obj)
             let path: String
@@ -270,7 +276,7 @@ enum Tools {
             for _ in 0..<3 {
                 if case .success = attempt { break }
                 usleep(150_000)
-                guard let fresh = Session.rebindExcluding(shared, helper, badWindowId: captured) else {
+                guard let fresh = Session.rebindExcluding(shared, helper, badWindowId: captured, agent) else {
                     return ActionReport.err(noWindowReason(helper, t, "no window to capture"))
                 }
                 captured = fresh.windowId
@@ -288,7 +294,7 @@ enum Tools {
 
         case "record":
             let t: Target
-            do { t = try Session.liveTarget(shared, helper, force: true) }
+            do { t = try Session.liveTarget(shared, helper, force: true, agent) }
             catch { return ActionReport.err("\(error)") }
             let agent = agentId(obj)
             let path: String
@@ -313,7 +319,7 @@ enum Tools {
 
         case "open_file":
             let t: Target
-            do { t = try Session.currentTarget(shared) } catch { return ActionReport.err("\(error)") }
+            do { t = try Session.currentTarget(shared, agent) } catch { return ActionReport.err("\(error)") }
             let path = asString(obj["path"]) ?? ""
             if path.trimmingCharacters(in: .whitespaces).isEmpty {
                 return ActionReport.err("open_file needs a \"path\"")
@@ -328,7 +334,7 @@ enum Tools {
 
         case "close_file":
             let t: Target
-            do { t = try Session.liveTarget(shared, helper, force: true) }
+            do { t = try Session.liveTarget(shared, helper, force: true, agent) }
             catch { return ActionReport.err("\(error)") }
             var name = asString(obj["name"]) ?? ""
             if name.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -339,11 +345,11 @@ enum Tools {
                 && (t.windowTitle == name || t.windowTitle.isEmpty)
             do {
                 let closed = try helper.closeFile(pid: t.pid, name: name)
-                if closedWasBound, var cur = shared.target {
+                if closedWasBound, var cur = shared.effectiveTarget(for: agent) {
                     cur.windowId = 0
                     cur.windowTitle = ""
                     cur.bounds = Rect()
-                    shared.target = cur
+                    shared.setTarget(cur, for: shared.bindingKey(for: agent))
                     shared.boundsRefreshedAt = 0
                 }
                 var r = ActionReport.ok("closed \(closed)")
@@ -353,7 +359,7 @@ enum Tools {
 
         case "documents":
             let t: Target
-            do { t = try Session.liveTarget(shared, helper, force: true) }
+            do { t = try Session.liveTarget(shared, helper, force: true, agent) }
             catch { return ActionReport.err("\(error)") }
             let docs = helper.documents(pid: t.pid)
             var r = ActionReport.ok("\(docs.count) open document(s)")
@@ -390,7 +396,7 @@ enum Tools {
             return r
 
         case "wait_for":
-            return waitFor(obj, shared, helper)
+            return waitFor(obj, shared, helper, agent)
 
         case "workspace":
             let agent = agentId(obj)
@@ -414,7 +420,8 @@ enum Tools {
     /// kinds are the ones that actually come up: a control appearing (a button
     /// that enables when work finishes), text arriving in a field, a document
     /// opening, a window appearing, or the tree changing at all.
-    private static func waitFor(_ obj: [String: Any], _ shared: Shared, _ helper: Helper) -> ActionReport {
+    private static func waitFor(_ obj: [String: Any], _ shared: Shared, _ helper: Helper,
+                               _ agent: String = "default") -> ActionReport {
         let kind = (asString(obj["kind"]) ?? asString(obj["for"]) ?? "").lowercased()
         let timeoutMs = min(30_000, max(50, asInt(obj["timeout_ms"]) ?? 5_000))
         let intervalMs = min(1_000, max(20, asInt(obj["interval_ms"]) ?? 100))
@@ -426,7 +433,7 @@ enum Tools {
             return ActionReport.err("wait_for needs a \"kind\": label, text, document, window, or change")
         }
         let target: Target
-        do { target = try Session.liveTarget(shared, helper, force: false) }
+        do { target = try Session.liveTarget(shared, helper, force: false, agent) }
         catch { return ActionReport.err("\(error)") }
 
         let started = Date()
@@ -512,10 +519,11 @@ enum Tools {
         _ obj: [String: Any],
         _ mode: Mode,
         _ shared: Shared,
-        _ helper: Helper
+        _ helper: Helper,
+        _ agent: String
     ) -> ActionReport {
         let target: Target
-        do { target = try Session.liveTarget(shared, helper, force: false) }
+        do { target = try Session.liveTarget(shared, helper, force: false, agent) }
         catch { return ActionReport.err("\(error)") }
 
         func inWindow(_ x: Double, _ y: Double) -> String? {
