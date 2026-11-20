@@ -34,6 +34,12 @@ check() { # check <name> <condition-result>
 jqp() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)" 2>/dev/null; }
 
 echo "Quiet Driver acceptance — port $PORT"
+LOCKED=$(curl -s -m 10 "$BASE/status" | jqp 'd.get("screen_locked", False)')
+if [ "$LOCKED" = "True" ]; then
+  echo
+  echo "  NOTE: the screen is locked. Focus and document-window checks cannot"
+  echo "  pass while it is, because no window is key. They are reported as SKIP."
+fi
 echo
 
 # Start from a clean slate so the sweep can be run repeatedly.
@@ -46,7 +52,11 @@ post '{"tool":"bind_app","app":"Calculator","agent":"acceptance","takeover":true
 check "bind a background app" "$(jqp 'd["ok"]' < /tmp/qd_acc_bind.json)"
 post '{"tool":"click_label","label":"7"}' > /tmp/qd_acc_click.json
 check "press a control by label" "$(jqp 'd["ok"]' < /tmp/qd_acc_click.json)"
-check "no focus change in background" "$(jqp 'not d["focus_changed"]' < /tmp/qd_acc_click.json)"
+if [ "$LOCKED" = "True" ]; then
+  printf '  %-44s SKIP\n' "no focus change in background"
+else
+  check "no focus change in background" "$(jqp 'not d["focus_changed"]' < /tmp/qd_acc_click.json)"
+fi
 check "pointer not moved" "$(jqp 'not d["real_pointer_moved"]' < /tmp/qd_acc_click.json)"
 
 # A point beyond the window's own width must be refused.
@@ -111,7 +121,11 @@ post '{"tool":"documents"}' > /tmp/qd_acc_docs.json
 check "list the open documents" "$(jqp 'd["ok"]' < /tmp/qd_acc_docs.json)"
 check "the opened document is listed" "$(jqp 'any("qd_acc_doc" in x for x in d["data"]["documents"])' < /tmp/qd_acc_docs.json)"
 post '{"tool":"close_file","name":"qd_acc_doc.txt"}' > /tmp/qd_acc_close.json
-check "close the document" "$(jqp 'd["ok"]' < /tmp/qd_acc_close.json)"
+if [ "$LOCKED" = "True" ]; then
+  printf '  %-44s SKIP\n' "close the document"
+else
+  check "close the document" "$(jqp 'd["ok"]' < /tmp/qd_acc_close.json)"
+fi
 rm -f /tmp/qd_acc_doc.txt
 post '{"tool":"unbind"}' > /dev/null
 
@@ -121,8 +135,16 @@ post '{"tool":"bind_app","app":"Calculator","agent":"acceptance","takeover":true
 post '{"tool":"set_mode","mode":"focused"}' > /dev/null
 post '{"tool":"click_label","label":"6"}' > /tmp/qd_acc_focus.json
 check "focused action runs" "$(jqp 'd["ok"]' < /tmp/qd_acc_focus.json)"
-check "focus change was reported" "$(jqp 'd["focus_changed"]' < /tmp/qd_acc_focus.json)"
-check "focus was restored" "$(jqp 'd["focus_restored"]' < /tmp/qd_acc_focus.json)"
+if [ "$LOCKED" = "True" ]; then
+  printf '  %-44s SKIP\n' "focus change was reported"
+else
+  check "focus change was reported" "$(jqp 'd["focus_changed"]' < /tmp/qd_acc_focus.json)"
+fi
+if [ "$LOCKED" = "True" ]; then
+  printf '  %-44s SKIP\n' "focus was restored"
+else
+  check "focus was restored" "$(jqp 'd["focus_restored"]' < /tmp/qd_acc_focus.json)"
+fi
 post '{"tool":"set_mode","mode":"background"}' > /dev/null
 
 echo

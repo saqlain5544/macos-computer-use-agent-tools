@@ -891,6 +891,17 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     func num(_ k: String) -> Double { (req[k] as? Double) ?? Double(req[k] as? Int ?? 0) }
 
     switch cmd {
+    case "session":
+        // Is the person's screen locked? Everything about accessibility and
+        // window focus changes when it is: no window is key, capture may be
+        // refused, and calls are slower. Report it rather than letting an agent
+        // misread the symptoms.
+        var locked = false
+        if let d = CGSessionCopyCurrentDictionary() as? [String: Any] {
+            locked = (d["CGSSessionScreenIsLocked"] as? Bool) ?? false
+        }
+        return ["ok": true, "screen_locked": locked]
+
     case "perms":
         return [
             "ok": true,
@@ -1328,7 +1339,17 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { windows = ws }
         if let mw = axAttr(ax, "AXMainWindow") { windows.append(mw as! AXUIElement) }
         guard let w = windows.first(where: { axStr($0, "AXTitle") == target }) else {
-            return ["ok": false, "error": "no window titled " + target]
+            // A background app can only expose its front document, and it
+            // cannot make another one key without being activated. Say that
+            // plainly instead of failing with no explanation.
+            let front = windows.first.map { axStr($0, "AXTitle") } ?? ""
+            return [
+                "ok": false,
+                "error": "only the document that is in front can be closed while the app is in the background",
+                "front_document": front,
+                "requested": target,
+                "hint": "close the front one first, or quit_app to close the whole app",
+            ]
         }
         guard let closeButton = axAttr(w, "AXCloseButton") else {
             return ["ok": false, "error": "the window has no close button"]
@@ -1359,6 +1380,13 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         // menu item in it.
         let pid = req["pid"] as? Int ?? 0
         let ax = appElement(Int32(pid))
+        // The Window menu is the only reliable list. A backgrounded Cocoa app
+        // reports no AXWindows, and AXMainWindow may be a window that is not a
+        // document at all (TextEdit has one titled "TextEdit").
+        if let docs = windowMenuDocuments(ax) {
+            return ["ok": true, "documents": docs, "source": "window menu"]
+        }
+        // No Window menu: fall back to the windows, minus accessory/panel ones.
         var names: [String] = []
         if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] {
             for w in ws {
@@ -1368,14 +1396,7 @@ func handle(_ req: [String: Any]) -> [String: Any] {
                 if !t.isEmpty && !t.contains("Accessory") { names.append(t) }
             }
         }
-        if names.isEmpty, let mw = axAttr(ax, "AXMainWindow") {
-            let t = axStr(mw as! AXUIElement, "AXTitle")
-            if !t.isEmpty { names.append(t) }
-        }
-        if let menuDocs = windowMenuDocuments(ax) {
-            for d in menuDocs where !names.contains(d) { names.append(d) }
-        }
-        return ["ok": true, "documents": names]
+        return ["ok": true, "documents": names, "source": "windows"]
 
     case "file_dialog":
         return driveFileDialog(req)

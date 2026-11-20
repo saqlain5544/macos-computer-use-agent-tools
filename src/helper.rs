@@ -316,6 +316,14 @@ pub fn documents(h: &Helper, pid: i32) -> Vec<String> {
         .collect()
 }
 
+/// Whether the person's screen is locked.
+pub fn screen_locked(h: &Helper) -> bool {
+    h.ok(json!({"cmd": "session"}))
+        .ok()
+        .and_then(|v| v.get("screen_locked").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
 pub fn permissions(h: &Helper) -> Permissions {
     match h.call(json!({"cmd": "perms"})) {
         Ok(v) => Permissions {

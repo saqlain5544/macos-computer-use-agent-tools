@@ -361,6 +361,14 @@ def main() -> int:
     print("Quiet Driver — performance harness")
     print(f"  daemon: {base()} (pid {daemon_pid()})")
 
+    status = get("/status")
+    if status.get("screen_locked"):
+        print("\n  REFUSING TO MEASURE: the screen is locked.")
+        print("  Accessibility and focus behave differently when the screen is")
+        print("  locked (no window is key, capture may be refused, calls are")
+        print("  slower), so a run now would not describe real use.")
+        return 2
+
     # Fresh distributions: measure this run only.
     try:
         req = urllib.request.Request(base() + "/metrics", data=b"{}", method="POST",

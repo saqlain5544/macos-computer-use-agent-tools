@@ -129,6 +129,26 @@ rather than a one-off, add it here with the same shape: what happens, why, the
 route around it, and the status. That way the next agent hits the knowledge
 instead of the wall.
 
+### The screen being locked changes everything, silently
+
+**What happens.** With `CGSSessionScreenIsLocked`, no window is key, the
+frontmost application is `loginwindow`, `screencapture` may be refused, and
+accessibility calls become much slower. Actions that depend on a key window —
+closing a specific document, anything in focused mode — stop working. Ordinary
+AX presses on a background app still work.
+
+**Why it matters.** This is not a bug, but it looks exactly like one: calls that
+worked a minute ago start failing or take a second each. A person walking away
+and the screen locking is a completely normal event.
+
+**What the driver does now.** `status` reports `screen_locked`, refreshed from
+`CGSessionCopyCurrentDictionary`. The performance harness **refuses to run** on
+a locked screen, because a measurement taken then does not describe real use.
+The acceptance sweep marks focus and document checks `SKIP` instead of `FAIL`.
+
+**Route around it.** Nothing to fix: report it to the agent so it can wait, or
+keep doing the AX work that does not need a key window.
+
 ## Logged by agents
 
 These came from `log_friction` during development, verbatim. The live

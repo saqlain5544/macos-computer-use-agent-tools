@@ -114,7 +114,13 @@ pub fn spawn(shared: Handle, pool: Arc<WorkerPool>) -> Option<u16> {
                     publish_port(port);
                 }
                 // Cheap liveness refresh for the dashboard readout.
-                let (pid, name) = helper::frontmost(&pool.session());
+                let session = pool.session();
+                let locked = helper::screen_locked(&session);
+                {
+                    let mut s = shared.lock().unwrap();
+                    s.screen_locked = locked;
+                }
+                let (pid, name) = helper::frontmost(&session);
                 let mut s = shared.lock().unwrap();
                 if pid != 0 && !name.is_empty() {
                     s.frontmost = name;
@@ -410,6 +416,7 @@ fn status_json(shared: &Handle) -> String {
         "focus_events": s.focus_events,
         "actions_total": s.actions_total,
         "agent_cursor": [s.agent_cursor.x, s.agent_cursor.y],
+        "screen_locked": s.screen_locked,
         "permissions": {
             "accessibility": s.permissions.accessibility,
             "post_events": s.permissions.post_events,

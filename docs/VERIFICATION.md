@@ -259,7 +259,27 @@ The first implementation of `close_file` reported success without closing
 anything — the acceptance sweep caught it because it checks the document list
 afterwards. That is why the sweep exists.
 
-## 11. What is *not* verified
+## 11. A locked screen is detected, not guessed
+
+**Method.** Lock the machine, then read `/status`.
+
+```
+screen_locked: true
+click_label on a background app -> ok
+close_file on a specific document -> refused
+```
+
+Accessibility presses on a background app keep working while the screen is
+locked; anything that needs a key window does not, and the calls that used to
+take 15 ms can take a second. The harness refuses to measure in that state, and
+the sweep marks the affected checks `SKIP` rather than `FAIL`, because a run
+there would describe the lock and not the driver.
+
+**Note on the numbers in this document.** They were recorded with the screen
+unlocked. A run against a locked screen is not comparable and the harness
+rejects it.
+
+## 12. What is *not* verified
 
 Honesty about the edges:
 
