@@ -48,7 +48,13 @@ def get(path: str) -> dict:
         return json.loads(r.read())
 
 
+PERF_AGENT = "perf"
+
+
 def post(tool: str, **kw) -> dict:
+    # The harness is one agent; it says so, so it keeps its own binding even
+    # while real agents are bound to their own apps.
+    kw.setdefault("agent", PERF_AGENT)
     body = json.dumps({"tool": tool, **kw}).encode()
     req = urllib.request.Request(
         base() + "/action", data=body, method="POST",

@@ -69,15 +69,19 @@ final class Shared {
     /// bound anything) and exactly one binding exists, use it: that is what a
     /// single-agent client means, and it is what every simple HTTP call looks
     /// like. With two bindings there is no safe guess, so the answer is nothing.
+    /// How many distinct agents hold a binding right now.
+    var bindingCount: Int { locked { _targets.count } }
+
     func effectiveTarget(for agent: String) -> Target? {
         let key = agent.isEmpty ? "default" : agent
-        // "default" is what an unnamed caller becomes, so it counts as unnamed.
-        // It never has a privileged binding of its own: an unnamed caller means
-        // "the app I just bound", which is the most recent binding. Preferring a
-        // long-lived "default" entry over that sent calls to whatever app that
-        // entry happened to hold.
+        // An unnamed caller means "the app I just bound" — but only while that is
+        // unambiguous. Three real-world agents sharing one daemon proved the
+        // danger: a caller that forgot its id silently acted on whichever app was
+        // bound last, which was another agent's. With more than one binding, no
+        // guess is safe, and the honest answer is to say so.
         if agent.isEmpty || key == "default" {
             return locked {
+                if _targets.count > 1 { return nil }
                 if let last = _lastBound, let t = _targets[last] { return t }
                 return _targets[key]
             }
@@ -286,6 +290,12 @@ enum Session {
 
     static func currentTarget(_ shared: Shared, _ agent: String = "default") throws -> Target {
         guard let t = shared.effectiveTarget(for: agent), t.pid != 0 || !t.identity.isEmpty else {
+            let count = shared.bindingCount
+            if count > 1 {
+                throw SessionError.failed(
+                    "\(count) agents have apps bound, so this call cannot guess which app you mean: "
+                    + "pass your own agent id on every call (the one you used with bind_app)")
+            }
             throw SessionError.failed("no app is bound yet — run {\"tool\":\"bind_app\",\"app\":\"<name>\"} first (GET /windows lists them)")
         }
         return t

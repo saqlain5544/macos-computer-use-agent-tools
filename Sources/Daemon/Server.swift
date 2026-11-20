@@ -28,7 +28,17 @@ final class Server {
     }
 
     /// Bind, publish the port, and start accepting. Returns the port.
+    /// Wire the MCP surface's operations into the log.
     func start(preferredPort: UInt16) -> UInt16? {
+        MCP.operationObserver = { [weak self] tool, args, report, agent in
+            guard let self else { return }
+            var stamped = report
+            stamped.mode = self.shared.mode.rawValue
+            stamped.modeSource = "session"
+            stamped.targetLabel = self.shared.effectiveTarget(for: agent)?.label ?? ""
+            stamped.phases["total_ms"] = 0
+            self.logOperation(tool: tool, args: args, report: stamped, agent: agent)
+        }
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         var yes: Int32 = 1

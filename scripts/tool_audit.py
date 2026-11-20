@@ -37,7 +37,13 @@ def get(path: str) -> dict:
         return json.loads(r.read())
 
 
+AUDIT_AGENT = "audit"
+
+
 def post(tool: str, **kw) -> dict:
+    # Name the agent on every call: on a machine running other agents an
+    # unnamed call is refused rather than guessed at.
+    kw.setdefault("agent", AUDIT_AGENT)
     body = json.dumps({"tool": tool, **kw}).encode()
     req = urllib.request.Request(base() + "/action", data=body, method="POST",
                                  headers={"Content-Type": "application/json"})

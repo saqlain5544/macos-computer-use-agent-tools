@@ -20,7 +20,10 @@ PASS=0
 FAIL=0
 
 post() { # post <json> -> body
-  curl -s -m 60 -X POST "$BASE/action" -H 'Content-Type: application/json' -d "$1"
+  # Every call names an agent. On a machine that is also running real agents, an
+  # unnamed call is refused rather than guessed, so the sweep says who it is.
+  curl -s -m 60 -X POST "$BASE/action" -H 'Content-Type: application/json' \
+    -d "$(printf '%s' "$1" | python3 -c 'import json,sys; o=json.load(sys.stdin); o.setdefault("agent","acceptance"); print(json.dumps(o))')"
 }
 
 check() { # check <name> <condition-result>
@@ -92,6 +95,9 @@ post '{"tool":"bind_app","app":"Calculator","agent":"acceptance-2"}' > /tmp/qd_a
 check "a second agent is refused" "$(jqp 'not d["ok"]' < /tmp/qd_acc_own.json)"
 post '{"tool":"bind_app","app":"Calculator","agent":"acceptance-2","takeover":true}' > /tmp/qd_acc_take.json
 check "takeover is allowed" "$(jqp 'd["ok"]' < /tmp/qd_acc_take.json)"
+# The takeover moved the app to "acceptance-2". Hand it back, so the rest of the
+# sweep keeps acting as the single agent it has been using throughout.
+post '{"tool":"bind_app","app":"Calculator","agent":"acceptance","takeover":true}' > /dev/null
 
 post '{"tool":"launch_app","app":"Calculator"}' > /dev/null
 sleep 1

@@ -48,26 +48,26 @@ enum MCP {
                                 "takeover": bool("Take the app over from another agent")], ["app"]) }),
             Spec(name: "unbind",
                  description: "Release the bound app. Its worker stops and the next action needs a new bind.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
             Spec(name: "rebind",
                  description: "Re-resolve the bound app after it was quit and relaunched. Actions do this automatically; use it when you want it to happen now.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
             Spec(name: "launch_app",
                  description: "Launch an app in the background, without binding it and without stealing focus.",
-                 schema: { obj(["app": str("App name or bundle id")], ["app"]) }),
+                 schema: { obj(["agent": agent, "app": str("App name or bundle id")], ["app"]) }),
             Spec(name: "quit_app",
                  description: "Quit an app by name or bundle id. Refuses rather than discarding unsaved work; pass force only when the person has agreed to lose it.",
-                 schema: { obj(["app": str("App name or bundle id"),
+                 schema: { obj(["agent": agent, "app": str("App name or bundle id"),
                                 "force": bool("Terminate even if the app does not quit on its own (discards unsaved work)")], ["app"]) }),
             Spec(name: "list_windows",
                  description: "Every on-screen window with its app, pid, id, title and bounds, plus the frontmost app.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
             Spec(name: "get_accessibility_tree",
                  description: "The bound app's accessibility tree: roles, titles, descriptions, values, frames. Truncated to 800 nodes.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
             Spec(name: "get_desktop_state",
                  description: "The frontmost app, the bound target and the current mode.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
             Spec(name: "click",
                  description: "Click a point in the bound window. Presses the control under the point when there is one, otherwise delivers a click to the app's own process. Never moves the person's pointer.",
                  schema: { obj(["x": num("x in window coordinates"), "y": num("y in window coordinates"),
@@ -77,7 +77,7 @@ enum MCP {
                  schema: { obj(["x": num("x"), "y": num("y"), "agent": agent], ["x", "y"]) }),
             Spec(name: "right_click",
                  description: "Right-click a point in the bound window.",
-                 schema: { obj(["x": num("x"), "y": num("y")], ["x", "y"]) }),
+                 schema: { obj(["agent": agent, "x": num("x"), "y": num("y")], ["x", "y"]) }),
             Spec(name: "move_cursor",
                  description: "Move the agent's virtual cursor over a point. The person's pointer is untouched.",
                  schema: { obj(["x": num("x"), "y": num("y")], ["x", "y"]) }),
@@ -87,30 +87,30 @@ enum MCP {
                                 "to": point(), "agent": agent], ["x", "y", "to"]) }),
             Spec(name: "scroll",
                  description: "Scroll at a point in the bound window.",
-                 schema: { obj(["x": num("x"), "y": num("y"),
+                 schema: { obj(["agent": agent, "x": num("x"), "y": num("y"),
                                 "lines": num("Lines to scroll; positive scrolls down")], ["x", "y"]) }),
             Spec(name: "type_text",
                  description: "Type text into the bound app's focused text field, wherever the caret is.",
                  schema: { obj(["text": str("Text to type"), "agent": agent], ["text"]) }),
             Spec(name: "press_key",
                  description: "Press one key in the bound app, e.g. \"Return\" or \"Tab\".",
-                 schema: { obj(["text": str("Key name, e.g. Return")], ["text"]) }),
+                 schema: { obj(["agent": agent, "text": str("Key name, e.g. Return")], ["text"]) }),
             Spec(name: "hotkey",
                  description: "Press a key chord in the bound app, e.g. \"cmd+shift+t\".",
-                 schema: { obj(["text": str("Chord, e.g. cmd+shift+t")], ["text"]) }),
+                 schema: { obj(["agent": agent, "text": str("Chord, e.g. cmd+shift+t")], ["text"]) }),
             Spec(name: "set_value",
                  description: "Set the bound app's text field to a value directly, rather than typing it.",
-                 schema: { obj(["text": str("New value")], ["text"]) }),
+                 schema: { obj(["agent": agent, "text": str("New value")], ["text"]) }),
             Spec(name: "set_caret",
                  description: "Move the insertion point in the bound app's text field. location 0 = start, 1 = end, other values are an absolute offset.",
-                 schema: { obj(["location": num("0 = start, 1 = end, else absolute offset"),
+                 schema: { obj(["agent": agent, "location": num("0 = start, 1 = end, else absolute offset"),
                                 "length": num("0 = no selection, -1 = to the end")], ["location"]) }),
             Spec(name: "click_label",
                  description: "Press a control in the bound app by its label, e.g. \"Equals\" or \"Save\". Matching is exact first, then case-insensitive, then a unique word subset.",
-                 schema: { obj(["label": str("control label")], ["label"]) }),
+                 schema: { obj(["agent": agent, "label": str("control label")], ["label"]) }),
             Spec(name: "get_text",
                  description: "Read the bound app's text field.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
             Spec(name: "screenshot",
                  description: "Capture the bound window to a PNG. Works when the app is background, occluded, minimised, on another Space, or hidden. Saved into your workspace unless you give a path.",
                  schema: { obj(["agent": agent,
@@ -122,13 +122,13 @@ enum MCP {
                                 "agent": agent], []) }),
             Spec(name: "open_file",
                  description: "Open a document in the bound app without showing a file panel and without stealing focus.",
-                 schema: { obj(["path": str("the file to open")], ["path"]) }),
+                 schema: { obj(["agent": agent, "path": str("the file to open")], ["path"]) }),
             Spec(name: "close_file",
                  description: "Close one document of the bound app, leaving the app running.",
-                 schema: { obj(["name": str("the document; defaults to the frontmost one")], []) }),
+                 schema: { obj(["agent": agent, "name": str("the document; defaults to the frontmost one")], []) }),
             Spec(name: "documents",
                  description: "The documents the bound app has open.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
             Spec(name: "log_friction",
                  description: "Record a problem you hit while driving an app, so it can be fixed later.",
                  schema: { obj(["problem": str("what went wrong"),
@@ -137,13 +137,13 @@ enum MCP {
                                 "agent": agent], ["problem"]) }),
             Spec(name: "friction_log",
                  description: "Read back the friction points logged so far.",
-                 schema: { obj(["limit": num("how many entries")], []) }),
+                 schema: { obj(["agent": agent, "limit": num("how many entries")], []) }),
             Spec(name: "workspace",
                  description: "Your own directory for disposable artefacts, and what is in it.",
                  schema: { obj(["agent": agent], []) }),
             Spec(name: "wait_for",
                  description: "Wait for something to become true in the bound app, instead of polling: a control appearing (label), text arriving in a field, a document opening, a window appearing, or the accessibility tree changing at all. Returns the elapsed time, or explains what it last saw when it times out.",
-                 schema: { obj([
+                 schema: { obj(["agent": agent, 
                     "kind": ["type": "string",
                              "enum": ["label", "text", "document", "window", "change"],
                              "description": "What to wait for"],
@@ -166,7 +166,7 @@ enum MCP {
                  schema: { obj(["since_seconds": num("window, default 3600")], []) }),
             Spec(name: "status",
                  description: "The driver's state: bound target, mode, frontmost app, permissions, counters.",
-                 schema: { obj([:], []) }),
+                 schema: { obj(["agent": agent], []) }),
         ]
     }
 
@@ -174,6 +174,10 @@ enum MCP {
     static var toolNames: [String] { specs().map { $0.name } }
 
     // MARK: JSON-RPC
+
+    /// Called for every tool call made over MCP, so those operations land in
+    /// the log like the HTTP ones do.
+    static var operationObserver: ((String, [String: Any], ActionReport, String) -> Void)?
 
     static func handleHTTP(_ body: String, shared: Shared, pool: WorkerPool, metrics: Metrics) -> String {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -272,18 +276,33 @@ enum MCP {
             callMode = parsed
         }
         let mode = callMode ?? shared.mode
-        shared.noteAgent(agentId(args))
+        // The agent id has to reach the tool: it decides which binding the call
+        // acts on and which workspace the artefact lands in. Without it every
+        // MCP caller shared one binding, which is exactly the bug the first
+        // real-world drive exposed.
+        let agent = agentId(args)
+        shared.noteAgent(agent)
 
         let started = Date()
         let report = Tools.execute(tool: name, args: args, callMode: callMode,
-                                   shared: shared, pool: pool, mode: mode)
+                                   shared: shared, pool: pool, mode: mode, agent: agent)
         let micros = Date().timeIntervalSince(started) * 1_000_000
         metrics.record("mcp:" + name, micros: micros, ok: report.ok)
         shared.actionsTotal += 1
         if !report.ok { shared.lastError = report.error }
+        var stamped = report
+        stamped.phases["total_ms"] = round2(micros / 1000.0)
+        operationObserver?(name, args, stamped, agent)
 
         var text = report.detail
         if !report.error.isEmpty { text = "\(report.error): \(report.detail)" }
+        // The data has to be in the text block as well as in structuredContent.
+        // Not every client renders structuredContent, and a tool that answers
+        // "69 windows" without listing them is a tool the model cannot use —
+        // which is exactly how the first real-world drives reported it.
+        if let rendered = renderText(name, report.payload), !rendered.isEmpty {
+            text += "\n" + rendered
+        }
         var content: [[String: Any]] = [["type": "text", "text": text]]
         var payload = report.payload ?? [:]
 
@@ -293,6 +312,7 @@ enum MCP {
             content.append(["type": "image", "data": data.base64EncodedString(), "mimeType": "image/png"])
         }
         if !report.targetLabel.isEmpty { payload["target"] = report.targetLabel }
+        payload["agent"] = agent
         payload["mode"] = report.mode
         payload["real_pointer_moved"] = report.pointerMoved
         payload["focus_changed"] = report.focusChanged
@@ -302,6 +322,118 @@ enum MCP {
             "isError": !report.ok,
             "structuredContent": payload,
         ])
+    }
+
+    /// Render a tool's payload as text an agent can read.
+    ///
+    /// Kept compact on purpose: enough to act on, not so much that the reply
+    /// swamps the context. Anything longer than this is better fetched with a
+    /// filter or a limit.
+    private static func renderText(_ tool: String, _ payload: [String: Any]?) -> String? {
+        guard let payload = payload else { return nil }
+        func line(_ parts: [String?]) -> String {
+            parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ")
+        }
+        var rows: [String] = []
+
+        switch tool {
+        case "get_text":
+            if let v = payload["value"] as? String {
+                rows.append("text: \(v.count > 2000 ? String(v.prefix(2000)) + "…" : v)")
+            }
+        case "list_windows", "get_desktop_state":
+            if let wins = payload["windows"] as? [[String: Any]] {
+                for w in wins.prefix(40) {
+                    let b = w["bounds"] as? [String: Any] ?? [:]
+                    rows.append(line([w["app"] as? String,
+                                      "id \(w["window_id"] as? Int ?? 0)",
+                                      "pid \(w["pid"] as? Int ?? 0)",
+                                      "\((b["w"] as? Double ?? 0))x\((b["h"] as? Double ?? 0))",
+                                      (w["title"] as? String).map { "\"\($0)\"" }]))
+                }
+                if wins.count > 40 { rows.append("… and \(wins.count - 40) more") }
+            }
+            if let f = payload["frontmost"] as? [String: Any] {
+                rows.append("frontmost: \(f["name"] as? String ?? "")")
+            }
+        case "get_accessibility_tree":
+            if let nodes = payload["nodes"] as? [[String: Any]] {
+                for n in nodes.prefix(120) {
+                    let indent = String(repeating: " ", count: min(20, n["depth"] as? Int ?? 0))
+                    let role = (n["role"] as? String ?? "").replacingOccurrences(of: "AX", with: "")
+                    rows.append(line([indent + role,
+                                      (n["title"] as? String).map { "\"\($0)\"" },
+                                      (n["description"] as? String).map { "\($0)" },
+                                      (n["value"] as? String).map { "= \($0.prefix(60))" }]))
+                }
+                if nodes.count > 120 {
+                    rows.append("… \(nodes.count - 120) more nodes; ask for a smaller app or use click_label")
+                }
+            }
+        case "documents":
+            if let docs = payload["documents"] as? [String] {
+                rows.append(docs.isEmpty ? "no documents" : docs.joined(separator: " | "))
+            }
+        case "status":
+            if let b = payload["bindings"] as? [[String: Any]], !b.isEmpty {
+                rows.append("bindings:")
+                for row in b {
+                    rows.append(line(["  " + (row["agent"] as? String ?? "?"),
+                                      (row["label"] as? String) ?? ""]))
+                }
+            }
+            rows.append(line(["mode", payload["mode"] as? String,
+                              "watch", (payload["watch_enabled"] as? Bool) == true ? "on" : "off",
+                              "actions", "\(payload["actions_total"] as? Int ?? 0)"]))
+        case "workspace":
+            if let files = payload["files"] as? [[String: Any]] {
+                for f in files.prefix(30) {
+                    rows.append("\(f["name"] as? String ?? "")  \(f["bytes"] as? Int ?? 0) bytes")
+                }
+            }
+        case "friction_log":
+            if let entries = payload["entries"] as? [[String: Any]] {
+                for e in entries.suffix(20) {
+                    rows.append(line([e["agent"] as? String,
+                                      e["source_tool"] as? String,
+                                      (e["problem"] as? String).map { String($0.prefix(100)) }]))
+                }
+            }
+        case "op_log":
+            if let entries = payload["entries"] as? [[String: Any]] {
+                for e in entries.suffix(40) {
+                    rows.append(line([e["ts"] as? String,
+                                      e["agent"] as? String,
+                                      e["tool"] as? String,
+                                      e["ok"] as? Bool == false ? "FAILED" : "ok",
+                                      "\(e["duration_ms"] as? Double ?? 0) ms",
+                                      (e["error"] as? String).map { String($0.prefix(60)) }]))
+                }
+            }
+        case "log_stats":
+            if let tools = payload["tools"] as? [String: [String: Any]] {
+                let sorted = tools.sorted { ((($0.value["p99_ms"] as? Double) ?? 0) > (($1.value["p99_ms"] as? Double) ?? 0)) }
+                for (name, s) in sorted.prefix(10) {
+                    rows.append(line([name, "n \(s["count"] as? Int ?? 0)",
+                                      "p50 \(s["p50_ms"] as? Double ?? 0) ms",
+                                      "p99 \(s["p99_ms"] as? Double ?? 0) ms"]))
+                }
+            }
+            if let f = payload["failures"] as? [String: Int], !f.isEmpty {
+                rows.append("failures:")
+                for (reason, n) in f.sorted(by: { $0.value > $1.value }).prefix(6) {
+                    rows.append("  \(n)x \(reason)")
+                }
+            }
+        default:
+            // Tools whose payload is a short set of scalars: show them as pairs.
+            for key in payload.keys.sorted() where key != "path" {
+                if let v = payload[key], !(v is [String: Any]), !(v is [Any]) {
+                    rows.append("\(key): \(v)")
+                }
+            }
+        }
+        return rows.isEmpty ? nil : rows.joined(separator: "\n")
     }
 
     // MARK: stdio bridge
@@ -395,6 +527,14 @@ enum MCP {
     /// The daemon owns the session, so an agent launched this way shares the
     /// bound app, the focus counters, and the action log with the dashboard.
     /// One message per line in, one message per line out.
+    /// Bridge MCP over stdin/stdout to the running daemon.
+    ///
+    /// Requests are dispatched concurrently, and replies are written as they
+    /// arrive. The serial version — read a line, wait for the answer, write it —
+    /// meant one slow call (a `wait_for` of thirty seconds, a recording) blocked
+    /// every other agent using the same bridge, which is exactly what happened
+    /// when three agents drove three apps at once. JSON-RPC replies carry their
+    /// own id, so out-of-order replies are correct.
     static func bridgeStdio() -> Int32 {
         var port = daemonPort()
         if port == nil {
@@ -408,16 +548,29 @@ enum MCP {
             FileHandle.standardError.write(Data("quiet-driver: could not reach the driver service\n".utf8))
             return 1
         }
-        let stdout = FileHandle.standardOutput
+
+        let writeLock = NSLock()
+        let queue = DispatchQueue(label: "quiet-driver.bridge", attributes: .concurrent)
+        let group = DispatchGroup()
+
         while let line = readLine(strippingNewline: true) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
-            guard let reply = postJSON(port: port, path: "/mcp", body: trimmed),
-                  !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            if let data = (reply.trimmingCharacters(in: .whitespacesAndNewlines) + "\n").data(using: .utf8) {
-                stdout.write(data)
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                guard let reply = postJSON(port: port, path: "/mcp", body: trimmed) else { return }
+                let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty, let data = (text + "\n").data(using: .utf8) else { return }
+                // One writer at a time: two replies interleaving would corrupt
+                // the stream for every reader.
+                writeLock.lock()
+                FileHandle.standardOutput.write(data)
+                writeLock.unlock()
             }
         }
+        // Let the in-flight calls finish so their replies are not lost.
+        group.wait()
         return 0
     }
 }

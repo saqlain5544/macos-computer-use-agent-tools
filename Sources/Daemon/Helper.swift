@@ -355,9 +355,10 @@ extension Helper {
         return asString(v["name"]) ?? app
     }
 
-    func screenshot(windowId: UInt32, path: String) throws -> (w: Int, h: Int, bytes: Int) {
-        let v = try ok(["cmd": "screenshot", "window_id": Int(windowId), "path": path])
-        return (asInt(v["width"]) ?? 0, asInt(v["height"]) ?? 0, asInt(v["bytes"]) ?? 0)
+    func screenshot(windowId: UInt32, path: String, native: Bool = false) throws -> (w: Int, h: Int, bytes: Int, scale: Double) {
+        let v = try ok(["cmd": "screenshot", "window_id": Int(windowId), "path": path, "native": native])
+        return (asInt(v["width"]) ?? 0, asInt(v["height"]) ?? 0, asInt(v["bytes"]) ?? 0,
+                asDouble(v["native_scale"]) ?? 1.0)
     }
 
     func record(pid: Int32, seconds: Double, path: String) throws -> [String: Any] {

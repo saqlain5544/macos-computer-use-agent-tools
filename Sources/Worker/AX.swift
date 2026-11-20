@@ -675,18 +675,48 @@ func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
     guard code == 0, FileManager.default.fileExists(atPath: path) else {
         return ["ok": false, "error": "screencapture exited \(code) for window \(wid)"]
     }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let bytes = (attrs?[.size] as? Int) ?? 0
         // Read the image's dimensions from its header. Decoding the whole PNG
-        // just to learn its size doubled the cost of a screenshot (65 ms of
-        // capture plus ~50 ms of decode for a 1348x816 window).
+        // just to learn its size doubled the cost of a screenshot.
         var width = 0, height = 0
         if let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
             width = (props[kCGImagePropertyPixelWidth] as? Int) ?? 0
             height = (props[kCGImagePropertyPixelHeight] as? Int) ?? 0
         }
-    return ["ok": true, "path": path, "bytes": bytes, "width": width, "height": height]
+
+        // Make the image's pixels match the window's points.
+        //
+        // A retina capture is twice the size of the window's coordinates, so an
+        // agent that measures a button in the screenshot and passes those
+        // numbers gets "outside the bound window" — which is exactly what the
+        // first real-world drive hit. Downscaled, 1 image pixel = 1 window point
+        // and coordinates can be read straight off the picture. `native: true`
+        // keeps the full-resolution capture for anyone who wants it.
+        let wantsNative = req["native"] as? Bool ?? false
+        var scale = 1.0
+        if !wantsNative, width > 0, let win = windowsList().first(where: { ($0["window_id"] as? Int) == wid }),
+           let pw = win["w"] as? Double, let ph = win["h"] as? Double, pw > 1, ph > 1 {
+            let targetW = Int(pw.rounded()), targetH = Int(ph.rounded())
+            if width != targetW || height != targetH {
+                scale = Double(width) / Double(targetW)
+                let s = Process()
+                s.executableURL = URL(fileURLWithPath: "/usr/bin/sips")
+                s.arguments = ["-z", String(targetH), String(targetW), path]
+                s.standardOutput = FileHandle.nullDevice
+                s.standardError = FileHandle.nullDevice
+                try? s.run()
+                s.waitUntilExit()
+                if s.terminationStatus == 0 {
+                    width = targetW
+                    height = targetH
+                }
+            }
+        }
+
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let bytes = (attrs?[.size] as? Int) ?? 0
+    return ["ok": true, "path": path, "bytes": bytes, "width": width, "height": height,
+            "native_scale": scale]
 }
 
 // MARK: - file dialogs
@@ -1692,18 +1722,54 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     case "open_file":
         // Open a document without showing a file panel and without bringing
         // the app forward. `open -g` is the whole trick.
+        //
+        // A path that does not exist yet is a legitimate request: "write this
+        // file" starts by creating an empty one. `open -g` refuses with "the
+        // file does not exist", so the empty file is created first.
         let path = req["path"] as? String ?? ""
         let app = req["app"] as? String ?? ""
         guard !path.isEmpty else { return ["ok": false, "error": "open_file needs a path"] }
+
+        var created = false
+        if !FileManager.default.fileExists(atPath: path) {
+            let dir = (path as NSString).deletingLastPathComponent
+            if !dir.isEmpty, !FileManager.default.fileExists(atPath: dir) {
+                try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            }
+            if FileManager.default.createFile(atPath: path, contents: Data()) {
+                created = true
+            } else {
+                return ["ok": false,
+                        "error": "could not create \(path) — the directory may not be writable",
+                        "path": path]
+            }
+        }
+
+        // `open` writes its complaint to stderr; capture it so a failure says
+        // why instead of reporting an empty error.
+        let stderrFile = "/tmp/quiet-driver-open-\(getpid()).txt"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         p.arguments = app.isEmpty ? ["-g", path] : ["-g", "-a", app, path]
+        let errPipe = Pipe()
+        p.standardError = errPipe
+        p.standardOutput = FileHandle.nullDevice
         do {
-            try p.run(); p.waitUntilExit()
-            return ["ok": p.terminationStatus == 0, "exit": Int(p.terminationStatus),
-                    "path": path, "app": app]
+            try p.run()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let message = String(decoding: errData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if p.terminationStatus == 0 {
+                return ["ok": true, "exit": 0, "path": path, "app": app, "created": created]
+            }
+            return ["ok": false, "exit": Int(p.terminationStatus), "path": path, "app": app,
+                    "created": created,
+                    "error": message.isEmpty
+                        ? "open failed for \(path) (exit \(p.terminationStatus))"
+                        : message]
         } catch {
-            return ["ok": false, "error": "\(error)"]
+            return ["ok": false, "error": "\(error)", "path": path]
         }
 
     case "close_file":

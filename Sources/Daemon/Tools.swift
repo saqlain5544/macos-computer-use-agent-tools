@@ -312,7 +312,7 @@ enum Tools {
             // window, which sends an agent looking for the wrong problem.
             var current = t.windowId
             var lastError = ""
-            var shot: (w: Int, h: Int, bytes: Int)?
+            var shot: (w: Int, h: Int, bytes: Int, scale: Double)?
             for attempt in 0..<4 {
                 if attempt > 0 { usleep(150_000) }
                 if attempt % 2 == 1,
@@ -320,7 +320,8 @@ enum Tools {
                     current = fresh.windowId
                 }
                 do {
-                    shot = try helper.screenshot(windowId: current, path: path)
+                    shot = try helper.screenshot(windowId: current, path: path,
+                                             native: asBool(obj["native"]) ?? false)
                     break
                 } catch {
                     lastError = "\(error)"
@@ -329,7 +330,8 @@ enum Tools {
             if let shot = shot {
                 var r = ActionReport.ok("captured \(shot.w)x\(shot.h) of \(t.label) (\(shot.bytes) bytes) to \(path)")
                 r.payload = ["path": path, "width": shot.w, "height": shot.h,
-                             "bytes": shot.bytes, "window": t.label]
+                             "bytes": shot.bytes, "window": t.label,
+                             "point_size": true, "native_scale": shot.scale]
                 return r
             }
             // Every retry failed. Say what that means for the caller rather than
