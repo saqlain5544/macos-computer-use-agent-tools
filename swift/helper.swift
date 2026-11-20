@@ -42,6 +42,69 @@ func axAttr(_ el: AXUIElement, _ name: String) -> AnyObject? {
 func axStr(_ el: AXUIElement, _ name: String) -> String {
     (axAttr(el, name) as? String) ?? ""
 }
+/// Recently walked control maps, keyed by pid.
+///
+/// Walking a real app's tree costs 40-100 ms because every node is a
+/// synchronous IPC call. Pressing a button changes the UI, so the cache is
+/// dropped after each press — but a retry, or a second press on the same
+/// window, reuses the walk instead of paying for it again.
+var controlCache: [Int32: (controls: [(AXUIElement, String)], frames: [CGRect], at: Date)] = [:]
+let controlCacheTTL: TimeInterval = 1.0
+
+/// Match a requested label against a control list.
+///
+/// Exact first, then case-insensitive, then a unique control whose words are a
+/// subset of the request ("All Clear" -> "Clear"). Nothing looser: pressing the
+/// wrong control is worse than failing.
+func matchControl(_ controls: [(AXUIElement, String)], _ label: String) -> (element: AXUIElement, name: String, index: Int)? {
+    func words(_ s: String) -> Set<String> {
+        Set(s.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
+    }
+    let needle = label.lowercased()
+    let wanted = words(label)
+    if let i = controls.firstIndex(where: { $0.1 == label }) { return (controls[i].0, controls[i].1, i) }
+    if let i = controls.firstIndex(where: { $0.1.lowercased() == needle }) { return (controls[i].0, controls[i].1, i) }
+    let subset = controls.enumerated().filter { c in
+        let w = words(c.element.1)
+        return !w.isEmpty && w.isSubset(of: wanted)
+    }
+    if subset.count == 1 { return (subset[0].element.0, subset[0].element.1, subset[0].offset) }
+    return nil
+}
+
+/// The app's editable text element.
+///
+/// The focused element is the right answer and costs one call. Walking the tree
+/// to find a text area costs over a second on a real document, because the walk
+/// reads every node in the document across process boundaries.
+func textElement(_ ax: AXUIElement) -> AXUIElement? {
+    func isText(_ el: AXUIElement) -> Bool {
+        let role = axStr(el, "AXRole")
+        return role == "AXTextArea" || role == "AXTextField"
+    }
+    // 1. Whatever has focus.
+    if let focused = axAttr(ax, "AXFocusedUIElement") {
+        let el = focused as! AXUIElement
+        if isText(el) { return el }
+        // Some apps focus a container; look one level down.
+        if let kids = axAttr(el, "AXChildren") as? [AXUIElement] {
+            for k in kids where isText(k) { return k }
+        }
+    }
+    // 2. A shallow search of the window, which is where editors put their text.
+    var stack: [(AXUIElement, Int)] = []
+    if let w = mainWindow(ax) { stack.append((w, 0)) }
+    if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { for w in ws { stack.append((w, 0)) } }
+    while let (el, d) = stack.popLast() {
+        if d > 8 { continue }
+        if isText(el) { return el }
+        if let kids = axAttr(el, "AXChildren") as? [AXUIElement] {
+            for k in kids.reversed() { stack.append((k, d + 1)) }
+        }
+    }
+    return nil
+}
+
 /// The element under a screen point, belonging to `pid`.
 ///
 /// `AXUIElementCopyElementAtPosition` is one call into the window server and
@@ -1071,19 +1134,36 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         var stack: [(AXUIElement, Int)] = []
         if let w = mainWindow(ax) { stack.append((w, 0)) }
         if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { for w in ws { stack.append((w, 0)) } }
+        // One batched attribute read per node. Reading role, title, description,
+        // value and size separately is five synchronous calls into the target
+        // app; on a 600-node document that is the difference between 950 ms and
+        // a fraction of it.
+        let names = ["AXRole", "AXTitle", "AXDescription", "AXValue", "AXPosition", "AXSize", "AXChildren"]
         while let (el, d) = stack.popLast() {
             if rows.count >= max || d > 12 { continue }
-            let kids = axAttr(el, "AXChildren") as? [AXUIElement] ?? []
-            let f = axFrame(el)
+            let attrs = axMulti(el, names)
+            var x = 0.0, y = 0.0, w = 0.0, h = 0.0
+            if let pv = attrs["AXPosition"] {
+                var p = CGPoint.zero
+                AXValueGetValue(pv as! AXValue, .cgPoint, &p); x = p.x; y = p.y
+            }
+            if let sv = attrs["AXSize"] {
+                var sz = CGSize.zero
+                AXValueGetValue(sv as! AXValue, .cgSize, &sz); w = sz.width; h = sz.height
+            }
+            let value = attrs["AXValue"] as? String ?? ""
             rows.append([
                 "depth": d,
-                "role": axStr(el, "AXRole"),
-                "title": axStr(el, "AXTitle"),
-                "description": axStr(el, "AXDescription"),
-                "value": axStr(el, "AXValue"),
-                "x": f.origin.x, "y": f.origin.y, "w": f.size.width, "h": f.size.height,
-                "actions": axActions(el),
+                "role": attrs["AXRole"] as? String ?? "",
+                "title": attrs["AXTitle"] as? String ?? "",
+                "description": attrs["AXDescription"] as? String ?? "",
+                // A document's whole text is its value: truncate it, since an
+                // agent needs to know there is text far more than it needs all
+                // of it shipped over the pipe on every tree read.
+                "value": value.count > 200 ? String(value.prefix(200)) + "…" : value,
+                "x": x, "y": y, "w": w, "h": h,
             ])
+            let kids = attrs["AXChildren"] as? [AXUIElement] ?? []
             for k in kids.reversed() { stack.append((k, d + 1)) }
         }
         return ["ok": true, "nodes": rows]
@@ -1114,35 +1194,54 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     case "press_label":
         let label = req["label"] as? String ?? ""
         let ax = appElement(pid)
-        var controls: [(AXUIElement, String)] = []
-        for el in walk(ax) {
-            let role = axStr(el, "AXRole")
-            guard ["AXButton", "AXCheckBox", "AXPopUpButton", "AXMenuItem", "AXRadioButton"].contains(role) else { continue }
-            let name = [axStr(el, "AXDescription"), axStr(el, "AXTitle"), axStr(el, "AXValue")]
-                .first(where: { !$0.isEmpty }) ?? ""
-            if !name.isEmpty { controls.append((el, name)) }
-        }
+        let controlRoles = ["AXButton", "AXCheckBox", "AXPopUpButton", "AXMenuItem", "AXRadioButton"]
 
-        func words(_ s: String) -> Set<String> {
-            Set(s.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
-        }
-        let needle = label.lowercased()
-        let wanted = words(label)
-
-        // 1. exact, 2. case-insensitive, 3. unique control whose words are a
-        // subset of the request's words ("All Clear" -> "Clear", but never
-        // "Clear Memory"). Nothing looser: pressing the wrong control is worse
-        // than failing.
-        var match: (AXUIElement, String)? = controls.first { $0.1 == label }
-        if match == nil { match = controls.first { $0.1.lowercased() == needle } }
-        if match == nil {
-            let subset = controls.filter { c in
-                let w = words(c.1)
-                return !w.isEmpty && w.isSubset(of: wanted)
+        // Fast path: a control map walked moments ago. Most presses do not
+        // restructure the tree, and re-walking on every click is what made a
+        // click cost ~100 ms. A stale element fails its press, which drops the
+        // cache and falls through to a fresh walk.
+        if let cached = controlCache[pid], Date().timeIntervalSince(cached.at) < controlCacheTTL,
+           let hit = matchControl(cached.controls, label) {
+            let frame = hit.index < cached.frames.count ? cached.frames[hit.index] : axFrame(hit.element)
+            let rc = AXUIElementPerformAction(hit.element, kAXPressAction as CFString).rawValue
+            if rc == 0 {
+                return [
+                    "ok": true, "rc": 0, "label": hit.name, "requested": label,
+                    "path": "cache",
+                    "x": frame.origin.x, "y": frame.origin.y,
+                    "w": frame.size.width, "h": frame.size.height,
+                ]
             }
-            if subset.count == 1 { match = subset[0] }
+            controlCache[pid] = nil
         }
-        guard let (el, name) = match else {
+
+        // Slow path: walk the app's windows, skipping the menu bar (which is
+        // large and holds nothing an action should be pressing). One batched
+        // attribute read per node instead of four separate IPC calls.
+        var controls: [(AXUIElement, String)] = []
+        func scan(_ el: AXUIElement, _ depth: Int) {
+            if depth > 30 || controls.count > 4000 { return }
+            let attrs = axMulti(el, ["AXRole", "AXDescription", "AXTitle", "AXValue", "AXChildren"])
+            let role = attrs["AXRole"] as? String ?? ""
+            if controlRoles.contains(role) {
+                let name = [attrs["AXDescription"], attrs["AXTitle"], attrs["AXValue"]]
+                    .compactMap { $0 as? String }
+                    .first(where: { !$0.isEmpty }) ?? ""
+                if !name.isEmpty { controls.append((el, name)) }
+            }
+            if role == "AXMenuBar" || role == "AXMenuBarItem" || role == "AXMenu" { return }
+            if let kids = attrs["AXChildren"] as? [AXUIElement] {
+                for k in kids { scan(k, depth + 1) }
+            }
+        }
+        if let mw = axAttr(ax, "AXMainWindow") { scan(mw as! AXUIElement, 0) }
+        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] {
+            for w in ws { scan(w, 0) }
+        }
+        if controls.isEmpty { scan(ax, 0) }
+
+        controlCache[pid] = (controls, controls.map { axFrame($0.0) }, Date())
+        guard let hit = matchControl(controls, label) else {
             let sample = controls.prefix(16).map { $0.1 }.joined(separator: ", ")
             return [
                 "ok": false,
@@ -1150,41 +1249,31 @@ func handle(_ req: [String: Any]) -> [String: Any] {
                 "available": Array(controls.prefix(64).map { $0.1 }),
             ]
         }
-        let frame = axFrame(el)
-        let rc = AXUIElementPerformAction(el, kAXPressAction as CFString).rawValue
+        let frame = axFrame(hit.element)
+        let rc = AXUIElementPerformAction(hit.element, kAXPressAction as CFString).rawValue
         return [
-            "ok": rc == 0, "rc": Int(rc), "label": name, "requested": label,
-            "x": frame.origin.x, "y": frame.origin.y, "w": frame.size.width, "h": frame.size.height,
+            "ok": rc == 0, "rc": Int(rc), "label": hit.name, "requested": label, "path": "walk",
+            "x": frame.origin.x, "y": frame.origin.y,
+            "w": frame.size.width, "h": frame.size.height,
         ]
 
     case "text_field":
-        let ax = appElement(pid)
-        for el in walk(ax) {
-            let role = axStr(el, "AXRole")
-            if role == "AXTextArea" || role == "AXTextField" {
-                let v = axStr(el, "AXValue")
-                return ["ok": true, "value": v, "role": role, "length": v.count]
-            }
-        }
-        return ["ok": false, "error": "no text field"]
+        guard let el = textElement(appElement(pid)) else { return ["ok": false, "error": "no text field"] }
+        let role = axStr(el, "AXRole")
+        let v = axStr(el, "AXValue")
+        return ["ok": true, "value": v, "role": role, "length": v.count]
 
     case "set_value":
-        let ax = appElement(pid)
         let value = req["value"] as? String ?? ""
-        for el in walk(ax) {
-            let role = axStr(el, "AXRole")
-            if role == "AXTextArea" || role == "AXTextField" {
-                let rc = AXUIElementSetAttributeValue(el, kAXValueAttribute as CFString, value as CFString).rawValue
-                if rc == 0 {
-                    var r = CFRange(location: 0, length: 0)
-                    if let av = AXValueCreate(.cfRange, &r) {
-                        _ = AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, av)
-                    }
-                }
-                return ["ok": rc == 0, "rc": Int(rc)]
+        guard let el = textElement(appElement(pid)) else { return ["ok": false, "error": "no text field"] }
+        let rc = AXUIElementSetAttributeValue(el, kAXValueAttribute as CFString, value as CFString).rawValue
+        if rc == 0 {
+            var r = CFRange(location: 0, length: 0)
+            if let av = AXValueCreate(.cfRange, &r) {
+                _ = AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, av)
             }
         }
-        return ["ok": false, "error": "no text field"]
+        return ["ok": rc == 0, "rc": Int(rc)]
 
     case "set_caret":
         let ax = appElement(pid)
