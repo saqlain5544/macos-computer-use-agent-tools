@@ -106,6 +106,9 @@ pub struct Shared {
     pub helper_ready: bool,
     /// Set when a second launch asks this daemon to show its dashboard.
     pub show_window: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// When the bound window's rectangle was last refreshed (unix millis), so
+    /// actions do not pay for a window enumeration every time.
+    pub bounds_refreshed_at: u64,
 }
 
 impl Default for Shared {
@@ -129,6 +132,7 @@ impl Default for Shared {
             last_error: String::new(),
             helper_ready: false,
             show_window: None,
+            bounds_refreshed_at: 0,
         }
     }
 }

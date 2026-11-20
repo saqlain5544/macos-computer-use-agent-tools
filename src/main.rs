@@ -214,8 +214,20 @@ fn main() -> eframe::Result<()> {
         std::process::exit(mcp::bridge_stdio());
     }
 
-    // Single instance: if a daemon is already serving, this launch just asks it
-    // to show its dashboard and exits.
+    // Single instance. Two guards, because both are needed:
+    //   1. an exclusive lock file, which settles the race when several launches
+    //      start at once (they would all pass a port check before any of them
+    //      published a port);
+    //   2. the published-port check, which asks a live daemon to show its
+    //      window instead of starting a second one.
+    let _lock = match instance_lock() {
+        Some(lock) => lock,
+        None => {
+            // Another daemon owns the session. Ask it for the dashboard and leave.
+            let _ = reveal_running_instance(&config);
+            return Ok(());
+        }
+    };
     if reveal_running_instance(&config) {
         return Ok(());
     }
@@ -234,7 +246,16 @@ fn main() -> eframe::Result<()> {
     // Ctrl-C / SIGTERM should remove the published port file.
     ctrlc_shutdown();
 
-    let port = server::spawn(shared.clone(), driver_helper.clone()).unwrap_or(0);
+    let port = match server::spawn(shared.clone(), driver_helper.clone()) {
+        Some(port) => port,
+        None => {
+            // Another process already serves the session. Do not linger as a
+            // second daemon with a dead control link: exit, and let the caller
+            // talk to the one that owns the port.
+            eprintln!("quiet-driver: another instance owns the control port; exiting");
+            return Ok(());
+        }
+    };
 
     let mut options = eframe::NativeOptions::default();
     let mut viewport = egui::ViewportBuilder::default()
@@ -295,6 +316,41 @@ fn main() -> eframe::Result<()> {
     );
     server::shutdown();
     result
+}
+
+/// Take the single-instance lock, or return None when another daemon holds it.
+///
+/// An advisory `flock` on a file in the state directory: it is released when
+/// the process exits, so a crash cannot leave a stale lock behind.
+fn instance_lock() -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+
+    let dir = std::env::var_os("HOME")
+        .map(|h| std::path::Path::new(&h).join(".quiet-driver"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/quiet-driver"));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("driver.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if std::env::var_os("QD_DEBUG_LOCK").is_some() {
+        eprintln!("quiet-driver: flock({}) -> {} errno {:?}", path.display(), rc, std::io::Error::last_os_error().raw_os_error());
+    }
+    if rc == 0 {
+        let _ = std::fs::write(&path, format!("{}\n", std::process::id()));
+        Some(file)
+    } else {
+        None
+    }
 }
 
 /// If a daemon is already listening on the published port, ask it to show its

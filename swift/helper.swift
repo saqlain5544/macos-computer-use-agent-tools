@@ -21,6 +21,12 @@ let _qdApp = NSApplication.shared
 
 // MARK: - helpers
 
+/// Read one AX attribute.
+///
+/// `AXUIElementCopyAttributeValue` returns a +1 reference. Declaring the out
+/// parameter as `AnyObject?` lets Swift's ARC own it, so it is released when
+/// the temporary goes out of scope — do not take ownership again by hand,
+/// which over-releases and crashes.
 func axAttr(_ el: AXUIElement, _ name: String) -> AnyObject? {
     var v: AnyObject?
     return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
@@ -28,6 +34,31 @@ func axAttr(_ el: AXUIElement, _ name: String) -> AnyObject? {
 func axStr(_ el: AXUIElement, _ name: String) -> String {
     (axAttr(el, name) as? String) ?? ""
 }
+/// Read several attributes in one IPC round trip.
+///
+/// Each `AXUIElementCopyAttributeValue` is a synchronous call into the target
+/// process. Walking a tree one attribute at a time costs ~250 us per attribute,
+/// which makes a label search over a 130-node app take ~65 ms. One batched call
+/// per node cuts that by roughly the number of attributes we read.
+func axMulti(_ el: AXUIElement, _ names: [String]) -> [String: AnyObject] {
+    var values: CFArray?
+    let rc = AXUIElementCopyMultipleAttributeValues(
+        el,
+        names as CFArray,
+        AXCopyMultipleAttributeOptions(rawValue: 0),
+        &values
+    )
+    guard rc == .success, let values, let array = values as? [AnyObject] else { return [:] }
+    var out: [String: AnyObject] = [:]
+    for (i, name) in names.enumerated() where i < array.count {
+        let value = array[i]
+        // NSNull marks an attribute the element does not have.
+        if value is NSNull { continue }
+        out[name] = value
+    }
+    return out
+}
+
 func axFrame(_ el: AXUIElement) -> CGRect {
     var p = CGPoint.zero
     var s = CGSize.zero
@@ -66,25 +97,80 @@ func walk(_ ax: AXUIElement, max: Int = 4000, depthLimit: Int = 40) -> [AXUIElem
     return out
 }
 
+/// Every top-level window, including off-screen, minimised, and other-Space ones.
+///
+/// Reads the CFArray and its CFDictionary entries directly instead of bridging
+/// them into Swift collections. The helper is a readLine() loop with no run
+/// loop, so nothing ever drains an autorelease pool; bridged dictionaries pile
+/// up and the process grows by tens of MB over a few thousand actions. Pulling
+/// out the handful of fields we need leaves nothing to accumulate.
 func windowsList() -> [[String: Any]] {
     var out: [[String: Any]] = []
-    guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return out }
-    for w in list {
-        let layer = w[kCGWindowLayer as String] as? Int ?? -1
-        let wid = w[kCGWindowNumber as String] as? Int ?? 0
+    guard let raw = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) else { return out }
+    // Bridge the keys once. `key as CFString` allocates a new CFString per
+    // call, and with ~120 windows × 10 fields that is over a thousand
+    // allocations per refresh, several refreshes per action.
+    let kNum = kCGWindowNumber as CFString
+    let kPid = kCGWindowOwnerPID as CFString
+    let kOwner = kCGWindowOwnerName as CFString
+    let kName = kCGWindowName as CFString
+    let kLayer = kCGWindowLayer as CFString
+    let kOnScreen = kCGWindowIsOnscreen as CFString
+    let kBounds = kCGWindowBounds as CFString
+    let kX = "X" as CFString
+    let kY = "Y" as CFString
+    let kW = "Width" as CFString
+    let kH = "Height" as CFString
+    let count = CFArrayGetCount(raw)
+    for i in 0..<count {
+        guard let ptr = CFArrayGetValueAtIndex(raw, i) else { continue }
+        let dict = unsafeBitCast(ptr, to: CFDictionary.self)
+
+        func value(_ key: CFString) -> UnsafeRawPointer? {
+            CFDictionaryGetValue(dict, Unmanaged.passUnretained(key).toOpaque())
+        }
+        func int(_ key: CFString) -> Int {
+            guard let v = value(key) else { return 0 }
+            var n: Int64 = 0
+            CFNumberGetValue(unsafeBitCast(v, to: CFNumber.self), .longLongType, &n)
+            return Int(n)
+        }
+        func str(_ key: CFString) -> String {
+            guard let v = value(key) else { return "" }
+            return unsafeBitCast(v, to: CFString.self) as String
+        }
+        func double(_ key: CFString) -> Double {
+            guard let v = value(key) else { return 0 }
+            var d = 0.0
+            CFNumberGetValue(unsafeBitCast(v, to: CFNumber.self), .doubleType, &d)
+            return d
+        }
+        func flag(_ key: CFString) -> Bool {
+            guard let v = value(key) else { return false }
+            return unsafeBitCast(v, to: CFBoolean.self) == kCFBooleanTrue
+        }
+
+        let wid = int(kNum)
         guard wid > 0 else { continue }
-        let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+        var x = 0.0, y = 0.0, w = 0.0, h = 0.0
+        if let bv = value(kBounds) {
+            let bdict = unsafeBitCast(bv, to: CFDictionary.self)
+            func bdouble(_ key: CFString) -> Double {
+                guard let v = CFDictionaryGetValue(bdict, Unmanaged.passUnretained(key).toOpaque()) else { return 0 }
+                var d = 0.0
+                CFNumberGetValue(unsafeBitCast(v, to: CFNumber.self), .doubleType, &d)
+                return d
+            }
+            x = bdouble(kX); y = bdouble(kY); w = bdouble(kW); h = bdouble(kH)
+        }
         out.append([
-            "pid": w[kCGWindowOwnerPID as String] as? Int ?? 0,
+            "pid": int(kPid),
             "window_id": wid,
-            "owner": w[kCGWindowOwnerName as String] as? String ?? "",
-            "title": w[kCGWindowName as String] as? String ?? "",
-            "layer": layer,
-            "on_screen": (w[kCGWindowIsOnscreen as String] as? Bool) ?? false,
-            "x": b["X"] as? Double ?? 0,
-            "y": b["Y"] as? Double ?? 0,
-            "w": b["Width"] as? Double ?? 0,
-            "h": b["Height"] as? Double ?? 0,
+            "owner": str(kOwner),
+            "title": str(kName),
+            "layer": int(kLayer),
+            "on_screen": flag(kOnScreen),
+            "x": x, "y": y, "w": w, "h": h,
         ])
     }
     return out
@@ -1175,13 +1261,25 @@ func handle(_ req: [String: Any]) -> [String: Any] {
 // MARK: - main loop
 
 setvbuf(stdout, nil, _IOLBF, 0)
-while let line = readLine(strippingNewline: true) {
-    if line.isEmpty { continue }
+
+// One message in, one JSON line out, forever.
+//
+// The whole iteration runs inside an explicit autorelease pool. This process is
+// a readLine() loop with no run loop, so no pool is ever drained for us: the
+// bridged collections and strings that Foundation creates for each request pile
+// up, and the helper grows by several KB per action — tens of MB over a working
+// session. Pooling the iteration keeps the working set flat.
+while autoreleasepool(invoking: { () -> Bool in
+    // If the daemon that spawned us is gone, we are an orphan: exit rather
+    // than sit on a 30 MB AX connection for the rest of the session.
+    if getppid() == 1 { return false }
+    guard let line = readLine(strippingNewline: true) else { return false }
+    if line.isEmpty { return true }
     guard let data = line.data(using: .utf8),
           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     else {
         print("{\"ok\":false,\"error\":\"bad json\"}")
-        continue
+        return true
     }
     let reply = handle(obj)
     if let out = try? JSONSerialization.data(withJSONObject: reply),
@@ -1190,5 +1288,5 @@ while let line = readLine(strippingNewline: true) {
     } else {
         print("{\"ok\":false,\"error\":\"encode failed\"}")
     }
-    if (obj["cmd"] as? String) == "quit" { break }
-}
+    return (obj["cmd"] as? String) != "quit"
+}) {}

@@ -38,11 +38,23 @@ impl Helper {
                 let _ = c.child.kill();
                 let _ = c.child.wait();
             }
-            let compiled = self.script.with_file_name("quiet-driver-helper");
-            let (program, args): (String, Vec<String>) = if compiled.exists() {
-                (compiled.to_string_lossy().into_owned(), Vec::new())
-            } else {
-                ("swift".to_string(), vec![self.script.to_string_lossy().into_owned()])
+            // Prefer the compiled helper. It sits next to the binary, but
+            // `--helper` may point at a script elsewhere, so check all the
+            // places a bundle puts it before falling back to interpreting.
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(dir) = self.script.parent() {
+                candidates.push(dir.join("quiet-driver-helper"));
+                candidates.push(dir.join("../MacOS/quiet-driver-helper"));
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    candidates.push(dir.join("quiet-driver-helper"));
+                }
+            }
+            let compiled = candidates.into_iter().find(|p| p.exists());
+            let (program, args): (String, Vec<String>) = match compiled {
+                Some(path) => (path.to_string_lossy().into_owned(), Vec::new()),
+                None => ("swift".to_string(), vec![self.script.to_string_lossy().into_owned()]),
             };
             let mut child = Command::new(program)
                 .args(args)

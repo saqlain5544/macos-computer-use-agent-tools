@@ -140,26 +140,61 @@ windows and still serves every tool.
 
 ## 8. Latency
 
-Measured over loopback on the same machine.
+Measured over loopback against a bound Calculator, 20 iterations each, warm.
 
-| Operation | Time |
-|---|---|
-| `/health` | 5 ms |
-| `/status` | <1 ms |
-| helper cold start (compiled) | 47 ms |
-| helper cold start (interpreted) | 530 ms |
-| AX tree of Calculator (132 nodes) | ~90 ms |
-| screenshot of a 1348×816 window | ~180 ms |
-| `click_label` on Calculator | ~40 ms |
-| focus guard (activate + restore) | ~600 ms |
+| Operation | Time | Why |
+|---|---|---|
+| `/health` | 5 ms | |
+| `/status` | 1.7 ms | reads shared state, no IPC |
+| `/windows` (123 windows) | 1.7 ms | one window-server call |
+| `set_value` | 3 ms | one AX attribute write |
+| `get_accessibility_tree` | 13 ms | one tree walk |
+| `type_text` | 38 ms | one event per character |
+| `click` (coordinate) | 91 ms | hit-test walks the tree to find the element under the point |
+| `click_label` | 91 ms | walks the tree to find the control by name |
+| `screenshot` | 128 ms | window capture, PNG encode |
+| helper cold start (compiled) | 47 ms | |
+| helper cold start (interpreted) | 530 ms | |
+| focus guard (activate + restore) | ~600 ms | only in focused mode |
+
+The tree-walking operations dominate because every node is a synchronous IPC
+call into the target app: a 130-node app costs ~130 round trips. That is the
+price of acting on the app's own elements rather than on screen coordinates,
+and it is still well under a human's interaction rate.
 
 The driver ships a compiled helper next to the binary and falls back to
 interpreting the script when it is absent, so a source checkout works without
 a build step.
 
+## 9. Memory is flat over a long session
+
+**Method.** 2000 real `click_label` actions through the daemon, sampling the
+daemon and helper RSS.
+
+```
+before: daemon 8928 KB, helper 29712 KB
+after:  daemon 9184 KB, helper 28016 KB
+```
+
+Flat. Getting there took two real fixes:
+
+- The helper is a `readLine()` loop with no run loop, so nothing drained the
+  autorelease pools Foundation creates per request. The helper grew several KB
+  per action — tens of MB per session. Wrapping the whole iteration in an
+  explicit pool fixed it; a pool around only the handler did not, because the
+  JSON encode and print happen outside it.
+- Window enumeration bridged a CFArray of CFDictionary per call and leaked the
+  +1 reference. It is now read through the CF APIs directly, with the string
+  keys bridged once rather than per lookup.
+
+The first measurement of this "leak" was 27 KB per `windows` call; after fixing
+the pool it is 0. Measured, not assumed — and the first attempt at a fix
+(`takeRetainedValue` on AX attribute reads) over-released and crashed, which is
+why the sweep exists.
+
 ---
 
-## 9. Files open and close in the background
+## 10. Files open and close in the background
 
 **Method.** Bind TextEdit, open two documents, list them, close both, and
 check the person's frontmost app throughout.
@@ -185,7 +220,7 @@ The first implementation of `close_file` reported success without closing
 anything — the acceptance sweep caught it because it checks the document list
 afterwards. That is why the sweep exists.
 
-## 10. What is *not* verified
+## 11. What is *not* verified
 
 Honesty about the edges:
 

@@ -561,6 +561,9 @@ fn text_of(obj: &Map<String, Value>) -> String {
         .to_string()
 }
 
+/// How often an action may pay for a window enumeration.
+const BOUNDS_REFRESH_MS: u64 = 250;
+
 const TOOLS: &[&str] = &[
     "bind_app", "bind", "rebind", "launch_app", "launch", "quit_app", "unbind", "list_windows",
     "get_desktop_state",
@@ -944,28 +947,45 @@ fn run_tool(tool: &str, obj: &Map<String, Value>, shared: &Handle, helper: &Help
         Ok(t) => t,
         Err(e) => return ActionReport::err(e),
     };
-    // The app may have been quit and relaunched under us; follow its identity
-    // instead of failing on a stale pid.
-    if target.pid == 0 || session::refresh_bounds(helper, &target).is_none() {
-        match session::rebind(helper, shared) {
-            Ok(t) => target = t,
-            Err(e) => {
-                return ActionReport::err(format!(
-                    "{} was not running ({}); relaunch it and the next action will re-bind automatically",
-                    target.label(),
-                    e
-                ))
+    // Keep the binding honest: the app may have been quit and relaunched, or
+    // the window may have moved. One window enumeration answers both questions.
+    //
+    // It is throttled: enumerating the window server costs ~40 ms, and doing it
+    // on every action would dominate the latency of an AX press. A quarter
+    // second is far below the rate at which a person moves a window, and a
+    // stale rectangle is corrected on the next action rather than acted on
+    // blindly forever.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let due = {
+        let s = shared.lock().unwrap();
+        now_ms.saturating_sub(s.bounds_refreshed_at) >= BOUNDS_REFRESH_MS
+    };
+    if target.pid == 0 || due {
+        match session::refresh_bounds(helper, &target) {
+            Some(w) => {
+                if w.bounds != target.bounds {
+                    target.bounds = w.bounds;
+                }
+                let mut s = shared.lock().unwrap();
+                s.bounds_refreshed_at = now_ms;
+                if let Some(t) = s.target.as_mut() {
+                    t.bounds = target.bounds;
+                    t.window_title = target.window_title.clone();
+                }
             }
-        }
-    }
-    // The window may have moved or been resized since bind: keep coordinates
-    // honest instead of acting on a stale rectangle.
-    if let Some(w) = session::refresh_bounds(helper, &target) {
-        if w.bounds != target.bounds {
-            target.bounds = w.bounds;
-            if let Some(t) = shared.lock().unwrap().target.as_mut() {
-                t.bounds = w.bounds;
-            }
+            None => match session::rebind(helper, shared) {
+                Ok(t) => target = t,
+                Err(e) => {
+                    return ActionReport::err(format!(
+                        "{} was not running ({}); relaunch it and the next action will re-bind automatically",
+                        target.label(),
+                        e
+                    ))
+                }
+            },
         }
     }
 
