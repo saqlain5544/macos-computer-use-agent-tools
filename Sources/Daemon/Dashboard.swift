@@ -14,7 +14,7 @@ struct DashboardView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 720, minHeight: 520)
+        .frame(minWidth: 940, minHeight: 640)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -76,8 +76,48 @@ struct DashboardView: View {
                         Spacer()
                     }
                 }
+                Spacer()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                sectionTitle("Latency")
+                if model.latency.isEmpty {
+                    Text("no calls measured yet").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                ForEach(Array(model.latency.prefix(6).enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 4) {
+                        Text(row.tool)
+                            .font(.system(size: 11, design: .monospaced))
+                            .lineLimit(1)
+                        Spacer()
+                        Text(String(format: "%.0f", row.p50))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        Text("/ " + String(format: "%.0f", row.p99) + " ms")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Divider().padding(.vertical, 2)
+                sectionTitle("Accessibility tree")
+                Text("\(model.treeNodes) nodes").font(.system(size: 11, design: .monospaced))
+                ForEach(Array(model.treeSample.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 4) {
+                        Text(row.role)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Text(row.label)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                }
+                Spacer()
+            }
+            .frame(width: 250, alignment: .leading)
             .padding(20)
         }
     }
@@ -138,12 +178,18 @@ final class DashboardModel: ObservableObject {
     @Published var port = 0
     @Published var log: [(tool: String, detail: String, ok: Bool)] = []
     @Published var hint = ""
+    @Published var latency: [(tool: String, p50: Double, p99: Double)] = []
+    @Published var treeNodes = 0
+    @Published var treeSample: [(role: String, label: String)] = []
 
     /// When set, the dashboard is a viewer of a daemon in another process and
     /// reads state over HTTP. That is the normal case: the daemon runs headless
     /// and any number of dashboard windows can look at it.
     private let remotePort: UInt16?
     private let shared: Shared?
+    /// In dashboard-plus-daemon mode the port is on the shared state; read it
+    /// there so the same code can fetch metrics over HTTP.
+    private var optionalPort: UInt16? { remotePort ?? shared?.port }
     private var timer: Timer?
 
     init(shared: Shared) {
@@ -199,6 +245,40 @@ final class DashboardModel: ObservableObject {
         }
         pointerMoved = 0
         hint = "pointer moved counts only when a person moves it; the driver never does."
+
+        // What the driver is spending its time on, and what it can see. Both come
+        // from the same surface an agent uses, so the window shows the truth
+        // rather than a private view of it.
+        if let port = remotePort ?? optionalPort {
+            if let m = HTTP.getJSON(port: port, path: "/metrics"),
+               let slowest = m["slowest"] as? [[String: Any]] {
+                latency = slowest.compactMap { entry in
+                    guard let tool = entry["tool"] as? String,
+                          let stats = entry["stats"] as? [String: Any] else { return nil }
+                    return (tool: tool,
+                            p50: (stats["p50_ms"] as? Double) ?? 0,
+                            p99: (stats["p99_ms"] as? Double) ?? 0)
+                }
+            }
+            if let t = HTTP.getJSON(port: port, path: "/tree"),
+               let nodes = t["nodes"] as? [[String: Any]] {
+                treeNodes = nodes.count
+                let described = nodes.map(DashboardModel.describeNode)
+                let named = described.filter { !$0.label.isEmpty }
+                treeSample = Array((named.isEmpty ? described : named).prefix(9))
+            }
+        }
+    }
+
+    /// A node in one line: role without the AX prefix, then whatever text it has.
+    static func describeNode(_ n: [String: Any]) -> (role: String, label: String) {
+        let role = ((n["role"] as? String) ?? "").replacingOccurrences(of: "AX", with: "")
+        for key in ["title", "description", "value"] {
+            if let text = n[key] as? String, !text.isEmpty {
+                return (role: role, label: String(text.prefix(28)))
+            }
+        }
+        return (role: role, label: "")
     }
 
     func pause() { call("pause") }

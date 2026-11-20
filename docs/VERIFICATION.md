@@ -318,7 +318,29 @@ Removing Rust was not a mechanical translation. The eleven things it exposed:
 | a capture could retry the same dead window forever | rebind handed back the ghost; the retry now excludes the id that failed |
 | `click_label("+")` on Calculator | the key is labelled "Add" — a small symbol alias table fixes it, and real labels always win |
 
-## 17. What is *not* verified
+## 17. Waiting, instead of polling
+
+Agents used to poll: one round trip per check, and each one picked its own
+backoff. `wait_for` moves the loop into the driver.
+
+| Kind | Waits for | Measured |
+|---|---|---|
+| `label` | a control with that label exists | 28 ms when it already does |
+| `change` | the accessibility tree changed at all | caught a press in 434 ms |
+| `text` | a text field equals or contains a value | |
+| `document` | a document opens | |
+| `window` | a window with that title appears | |
+
+On timeout it reports what it last saw — "waited 600 ms for label and gave up:
+no control labelled X" — which is usually the answer the agent needed.
+
+The first version of this crashed the daemon: a 64-bit tree hash was sent as a
+JSON number and converted with `UInt64(Int)`, which traps in Swift for any value
+outside Int's range. The signature is hex text now, every number that crosses
+the worker boundary goes through a non-trapping converter, and the self-tests
+assert that a huge number is refused rather than fatal.
+
+## 18. What is *not* verified
 
 Honesty about the edges:
 

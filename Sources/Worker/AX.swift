@@ -1373,6 +1373,67 @@ func handle(_ req: [String: Any]) -> [String: Any] {
             "x": f.origin.x, "y": f.origin.y, "w": f.size.width, "h": f.size.height,
         ]
 
+    case "has_label":
+        // Does a control with this label exist right now? Cheap on purpose: it
+        // reuses the control map that press_label caches, so a polling client
+        // costs one IPC call per check instead of a full tree read.
+        let wanted = req["label"] as? String ?? ""
+        let ax = appElement(pid)
+        var controls: [(AXUIElement, String)] = []
+        if let cached = controlCache[pid], Date().timeIntervalSince(cached.at) < controlCacheTTL {
+            controls = cached.controls
+        } else {
+            let controlRoles = ["AXButton", "AXCheckBox", "AXPopUpButton", "AXMenuItem", "AXRadioButton"]
+            func scan(_ el: AXUIElement, _ depth: Int) {
+                if depth > 30 || controls.count > 4000 { return }
+                let attrs = axMulti(el, ["AXRole", "AXDescription", "AXTitle", "AXValue", "AXChildren"])
+                let role = attrs["AXRole"] as? String ?? ""
+                if controlRoles.contains(role) {
+                    let name = [attrs["AXDescription"], attrs["AXTitle"], attrs["AXValue"]]
+                        .compactMap { $0 as? String }.first(where: { !$0.isEmpty }) ?? ""
+                    if !name.isEmpty { controls.append((el, name)) }
+                }
+                if role == "AXMenuBar" || role == "AXMenuBarItem" || role == "AXMenu" { return }
+                if let kids = attrs["AXChildren"] as? [AXUIElement] { for k in kids { scan(k, depth + 1) } }
+            }
+            var roots: [AXUIElement] = []
+            if let mw = axAttr(ax, "AXMainWindow") { roots.append(mw as! AXUIElement) }
+            if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { roots.append(contentsOf: ws) }
+            for w in roots {
+                scan(w, 0)
+                if let sheets = axAttr(w, "AXSheets") as? [AXUIElement] {
+                    for sheet in sheets { scan(sheet, 0) }
+                }
+            }
+            if controls.isEmpty { scan(ax, 0) }
+            controlCache[pid] = (controls, controls.map { axFrame($0.0) }, Date())
+        }
+        let hit = matchControl(controls, wanted)
+        return ["ok": true, "present": hit != nil, "label": hit?.name ?? "",
+                "count": controls.count]
+
+    case "tree_sig":
+        // A stable signature of the accessibility tree, for "wait until
+        // something changed" without shipping every node to the daemon.
+        var hasher = Hasher()
+        var count = 0
+        for el in walk(appElement(pid), max: 1500) {
+            hasher.combine(axStr(el, "AXRole"))
+            hasher.combine(axStr(el, "AXTitle"))
+            hasher.combine(axStr(el, "AXDescription"))
+            let value = axStr(el, "AXValue")
+            if value.count < 200 { hasher.combine(value) }
+            let f = axFrame(el)
+            hasher.combine(Int(f.origin.x)); hasher.combine(Int(f.origin.y))
+            hasher.combine(Int(f.size.width)); hasher.combine(Int(f.size.height))
+            count += 1
+        }
+        // A 64-bit hash does not survive JSON numbers: the value can exceed
+        // Int64 and a careless conversion traps the daemon. Send it as hex text
+        // and compare strings.
+        let h = hasher.finalize()
+        return ["ok": true, "sig": String(format: "%016llx", UInt64(bitPattern: Int64(h))), "nodes": count]
+
     case "press_label":
         let label = req["label"] as? String ?? ""
         let ax = appElement(pid)

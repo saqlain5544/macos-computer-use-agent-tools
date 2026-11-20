@@ -98,6 +98,22 @@ launch_app    { app: "MyEditor" }     # background, no focus change
 # next action re-binds automatically
 ```
 
+## Waiting
+
+Do not poll. `wait_for` waits on the driver's side, with one call instead of a
+round trip per check:
+
+| What | Call |
+|---|---|
+| a control appears (a button that enables when work finishes) | `{kind: "label", label: "Export"}` |
+| text arrives in the field | `{kind: "text", value: "Done", contains: true}` |
+| a document opens | `{kind: "document", name: "report.pdf"}` |
+| a window appears | `{kind: "window", name: "Settings"}` |
+| anything on screen changed | `{kind: "change"}` |
+
+Default timeout is 5 s, max 30 s. On timeout it tells you what it last saw —
+usually that is the answer ("no control labelled Export; 14 controls present").
+
 ## When the driver gets in your way
 
 Call `log_friction` with what went wrong. It is written to a file that the
@@ -137,12 +153,13 @@ Read the collected backlog with `friction_log`.
 | `hotkey` | `text` | `"cmd+shift+t"` |
 | `set_value` | `text` | sets the text field directly; more reliable than typing |
 | `set_caret` | `location?`, `length?` | `location` 0 = start, 1 = end |
-| `click_label` | `label` | exact, then case-insensitive, then unique word subset |
+| `click_label` | `label` | exact, then case-insensitive, then unique word subset, then symbol aliases (`+` finds "Add") |
 | `get_text` | | the bound app's text field |
 | `open_file` | `path`, `app?` | open a document with no panel, no focus change |
 | `documents` | | the documents the app has open |
 | `close_file` | `name?` | close one document, leaving the app running |
 | `screenshot` | `path?`, `agent?` | PNG of the bound window |
+| `wait_for` | `kind`, `label?`/`text?`/`name?`, `timeout_ms?` | wait instead of polling: `label`, `text`, `document`, `window`, `change` |
 | `record` | `seconds?`, `path?`, `agent?` | .mov of the bound window |
 | `set_mode` | `mode` | `background` or `focused` |
 | `log_friction` | `problem`, `detail?`, `tool?`, `agent?` | |

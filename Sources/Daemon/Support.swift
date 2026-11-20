@@ -144,16 +144,27 @@ func jsonObject(_ text: String) -> [String: Any]? {
 }
 
 func asDouble(_ v: Any?) -> Double? {
-    if let d = v as? Double { return d }
+    if let d = v as? Double { return d.isFinite ? d : nil }
     if let i = v as? Int { return Double(i) }
-    if let n = v as? NSNumber { return n.doubleValue }
+    if let n = v as? NSNumber { let d = n.doubleValue; return d.isFinite ? d : nil }
+    if let s = v as? String { return Double(s) }
     return nil
 }
 
+/// Convert to Int without ever trapping.
+///
+/// `NSNumber.intValue` traps on a value outside Int's range, and a JSON body is
+/// attacker-shaped by definition: the first version of the wait_for tool killed
+/// the daemon this way. `Int(exactly:)` returns nil instead, which becomes an
+/// ordinary "that field was not a usable number".
 func asInt(_ v: Any?) -> Int? {
     if let i = v as? Int { return i }
-    if let d = v as? Double { return Int(d) }
-    if let n = v as? NSNumber { return n.intValue }
+    if let d = v as? Double { return Int(exactly: d.rounded()) }
+    if let n = v as? NSNumber { return Int(exactly: n.doubleValue.rounded()) }
+    if let s = v as? String {
+        if let i = Int(s) { return i }
+        if let d = Double(s) { return Int(exactly: d.rounded()) }
+    }
     return nil
 }
 

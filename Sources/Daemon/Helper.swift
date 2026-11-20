@@ -371,6 +371,17 @@ extension Helper {
                      w: asDouble(v["w"]) ?? 0, h: asDouble(v["h"]) ?? 0))
     }
 
+    func hasLabel(pid: Int32, label: String) throws -> Bool {
+        let v = try ok(["cmd": "has_label", "pid": Int(pid), "label": label])
+        return asBool(v["present"]) ?? false
+    }
+
+    /// A stable signature of the app's accessibility tree, as hex text.
+    func treeSignature(pid: Int32) throws -> String {
+        let v = try ok(["cmd": "tree_sig", "pid": Int(pid)])
+        return asString(v["sig"]) ?? ""
+    }
+
     func textField(pid: Int32) throws -> String {
         let v = try ok(["cmd": "text_field", "pid": Int(pid)])
         return asString(v["value"]) ?? ""

@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -155,6 +156,26 @@ def main() -> int:
 
     r = post("click", x=bounds["w"] + 500, y=10)
     check("out-of-window point refused", not r["ok"])
+
+    # --- waiting, against the calculator
+    t0 = time.time()
+    r = post("wait_for", kind="label", label="Equals", timeout_ms=2000)
+    check("wait_for an existing control", r["ok"] and (time.time() - t0) < 1.0,
+          f"{(time.time() - t0) * 1000:.0f} ms")
+
+    def press_soon():
+        time.sleep(0.35)
+        post("click_label", label="7")
+
+    threading.Thread(target=press_soon, daemon=True).start()
+    r = post("wait_for", kind="change", timeout_ms=3000)
+    check("wait_for a change sees a press", r["ok"], (r.get("error") or r["detail"])[:50])
+
+    t0 = time.time()
+    r = post("wait_for", kind="label", label="No Such Control", timeout_ms=600)
+    check("wait_for gives up with a reason",
+          not r["ok"] and "gave up" in (r.get("error") or "") and (time.time() - t0) < 2.0,
+          (r.get("error") or "")[:60])
 
     # --- keyboard, against the calculator
     calc_reset()

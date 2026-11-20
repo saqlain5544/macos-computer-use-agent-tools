@@ -7,6 +7,9 @@ import Foundation
 // What belongs here is everything that can be decided without one: the rules
 // that pick a window, shape a path, or decide what a report is allowed to claim.
 
+// Unbuffered, so a crash still shows which check it died on.
+setvbuf(stdout, nil, _IONBF, 0)
+
 var failures = 0
 var checks = 0
 
@@ -91,6 +94,24 @@ check("json sorts keys", jsonString(["b": 1, "a": 2]).hasPrefix("{\"a\""))
 check("invalid json is nil", jsonObject("{not json") == nil)
 check("an empty body is nil", jsonObject("") == nil)
 
+// MARK: conversions
+//
+// A trapping Swift conversion is not an error, it is a crash: the first version
+// parsed an unsigned 64-bit hash with UInt64(Int) and killed the daemon on the
+// second wait_for. Every value that crosses the worker boundary has to survive
+// nonsense.
+check("a huge number is refused, not trapped",
+      asInt(NSNumber(value: Double.greatestFiniteMagnitude)) == nil)
+check("an ordinary number still parses", asInt(NSNumber(value: 7)) == 7)
+check("a numeric string parses", asInt("12") == 12)
+check("a non-numeric string is nil", asInt("twelve") == nil)
+check("a negative window id is not a window",
+      asInt(-5).flatMap { UInt32(exactly: $0) } == nil)
+check("a huge window id is not a window",
+      asInt(Int.max).flatMap { UInt32(exactly: $0) } == nil)
+check("doubles parse from ints", asDouble(NSNumber(value: 7)) == 7)
+check("bools parse from numbers", asBool(NSNumber(value: 1)) == true)
+
 // MARK: metrics
 
 let metrics = Metrics()
@@ -113,6 +134,16 @@ check("error rate is a percentage", (snap["error_rate"] as? Double) == 3.85)
 metrics.reset()
 check("metrics reset clears history",
       ((metrics.snapshot(actionsTotal: 0)["tools"] as? [String: Any])?.isEmpty) == true)
+
+// MARK: routing
+//
+// A tool can be listed and advertised and still not be reachable: the dispatcher
+// has a second switch that decides whether a tool is a session tool or one that
+// acts on the app, and a name missing from it falls through to "unknown tool".
+// Comparing that switch's list against Tools.names is the cheap way to catch it.
+check("every tool is routed to a handler",
+      Tools.routedNames.count == Tools.names.count,
+      "missing: \(Tools.names.filter { !Tools.routedNames.contains($0) })")
 
 // MARK: surfaces agree
 

@@ -159,7 +159,7 @@ if isViewer {
     app.setActivationPolicy(.regular)
     let model = DashboardModel(remotePort: port)
     let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 780, height: 560),
+        contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
         styleMask: [.titled, .closable, .miniaturizable, .resizable],
         backing: .buffered, defer: false)
     window.title = "Quiet Driver"
@@ -225,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let model = DashboardModel(shared: driver.shared)
         let view = DashboardView(model: model)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Quiet Driver"

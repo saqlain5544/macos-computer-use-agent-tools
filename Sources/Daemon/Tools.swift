@@ -28,7 +28,7 @@ enum Tools {
         "click_label", "press_button", "get_text", "set_mode", "pause", "resume",
         "stop_driver", "start_driver", "status", "show_dashboard", "clipboard_read",
         "clipboard_write", "screenshot", "record", "log_friction", "friction_log",
-        "workspace", "open_file", "close_file", "documents",
+        "workspace", "open_file", "close_file", "documents", "wait_for",
     ]
 
     // MARK: worker selection
@@ -40,6 +40,20 @@ enum Tools {
         if let t = shared.target, !t.identity.isEmpty { return pool.forApp(t.identity) }
         return pool.session()
     }
+
+    /// Tools that change the binding or produce a file, rather than acting on the
+    /// app. Kept as data because the dispatcher and the self-tests must agree on
+    /// it: a name that is listed but not routed falls through to "unknown tool".
+    static let sessionTools: Set<String> = [
+        "show_dashboard", "start_driver", "resume", "stop_driver", "pause", "set_mode",
+        "status", "list_windows", "get_desktop_state", "bind_app", "bind", "rebind",
+        "launch_app", "launch", "quit_app", "unbind", "get_window_state",
+        "get_accessibility_tree", "screenshot", "record", "open_file", "close_file",
+        "documents", "log_friction", "friction_log", "workspace", "wait_for",
+    ]
+
+    /// Every name the dispatcher can reach.
+    static var routedNames: Set<String> { sessionTools.union(Set(names).subtracting(sessionTools)) }
 
     // MARK: entry
 
@@ -71,14 +85,9 @@ enum Tools {
         }
         var report: ActionReport
 
-        switch tool {
-        case "show_dashboard", "start_driver", "resume", "stop_driver", "pause", "set_mode",
-             "status", "list_windows", "get_desktop_state", "bind_app", "bind", "rebind",
-             "launch_app", "launch", "quit_app", "unbind", "get_window_state",
-             "get_accessibility_tree", "screenshot", "record", "open_file", "close_file",
-             "documents", "log_friction", "friction_log", "workspace":
+        if sessionTools.contains(tool) {
             report = sessionAndArtifactTool(tool, obj, shared, helper, pool)
-        default:
+        } else {
             report = actingTool(tool, obj, mode, shared, helper)
         }
         return report
@@ -380,6 +389,9 @@ enum Tools {
             r.payload = ["entries": entries, "path": Workspace.frictionLogPath]
             return r
 
+        case "wait_for":
+            return waitFor(obj, shared, helper)
+
         case "workspace":
             let agent = agentId(obj)
             do {
@@ -393,6 +405,96 @@ enum Tools {
         default:
             return ActionReport.err("unknown tool \"\(tool)\"")
         }
+    }
+
+    /// Wait for something to become true, on the driver's side.
+    ///
+    /// An agent that has to poll does one round trip per check and picks its own
+    /// backoff; doing it here is one call and a steady interval. The condition
+    /// kinds are the ones that actually come up: a control appearing (a button
+    /// that enables when work finishes), text arriving in a field, a document
+    /// opening, a window appearing, or the tree changing at all.
+    private static func waitFor(_ obj: [String: Any], _ shared: Shared, _ helper: Helper) -> ActionReport {
+        let kind = (asString(obj["kind"]) ?? asString(obj["for"]) ?? "").lowercased()
+        let timeoutMs = min(30_000, max(50, asInt(obj["timeout_ms"]) ?? 5_000))
+        let intervalMs = min(1_000, max(20, asInt(obj["interval_ms"]) ?? 100))
+        let wanted = asString(obj["label"]) ?? asString(obj["text"]) ?? asString(obj["value"])
+            ?? asString(obj["name"]) ?? ""
+        let contains = asBool(obj["contains"]) ?? false
+
+        if kind.isEmpty {
+            return ActionReport.err("wait_for needs a \"kind\": label, text, document, window, or change")
+        }
+        let target: Target
+        do { target = try Session.liveTarget(shared, helper, force: false) }
+        catch { return ActionReport.err("\(error)") }
+
+        let started = Date()
+        let deadline = started.addingTimeInterval(Double(timeoutMs) / 1000.0)
+        var lastSeen = ""
+        var baseline = ""
+
+        if kind == "change" {
+            guard let sig = try? helper.treeSignature(pid: target.pid), !sig.isEmpty else {
+                return ActionReport.err("could not read the accessibility tree to watch for a change")
+            }
+            baseline = sig
+        }
+
+        while true {
+            switch kind {
+            case "label":
+                if wanted.isEmpty { return ActionReport.err("wait_for kind=\"label\" needs a \"label\"") }
+                if let present = try? helper.hasLabel(pid: target.pid, label: wanted), present {
+                    return waitReport("\"\(wanted)\" appeared", started, target)
+                }
+                lastSeen = "no control labelled \"\(wanted)\""
+            case "text", "value":
+                guard let current = try? helper.textField(pid: target.pid) else {
+                    lastSeen = "no text field"
+                    break
+                }
+                let matched = contains ? current.contains(wanted) : current == wanted
+                if matched { return waitReport("the text field became \"\(wanted)\"", started, target) }
+                lastSeen = "text field is \"\(current.prefix(80))\""
+            case "document":
+                if wanted.isEmpty { return ActionReport.err("wait_for kind=\"document\" needs a \"name\"") }
+                let docs = helper.documents(pid: target.pid)
+                if docs.contains(where: { $0.localizedCaseInsensitiveContains(wanted) }) {
+                    return waitReport("document \"\(wanted)\" opened", started, target)
+                }
+                lastSeen = "documents: \(docs.isEmpty ? "none" : docs.joined(separator: ", "))"
+            case "window":
+                if wanted.isEmpty { return ActionReport.err("wait_for kind=\"window\" needs a \"name\"") }
+                let wins = helper.windowsList().filter {
+                    $0.pid == target.pid && Session.isUsableWindow($0)
+                }
+                if wins.contains(where: { $0.title.localizedCaseInsensitiveContains(wanted) }) {
+                    return waitReport("window \"\(wanted)\" appeared", started, target)
+                }
+                lastSeen = "\(wins.count) window(s), none matching \"\(wanted)\""
+            case "change":
+                if let sig = try? helper.treeSignature(pid: target.pid), !sig.isEmpty, sig != baseline {
+                    return waitReport("the accessibility tree changed", started, target)
+                }
+                lastSeen = "the tree has not changed"
+            default:
+                return ActionReport.err(
+                    "wait_for kind must be label, text, document, window, or change (got \"\(kind)\")")
+            }
+            if Date() >= deadline {
+                return ActionReport.err(
+                    "waited \(timeoutMs) ms for \(kind) and gave up: \(lastSeen)")
+            }
+            usleep(UInt32(intervalMs) * 1000)
+        }
+    }
+
+    private static func waitReport(_ what: String, _ started: Date, _ target: Target) -> ActionReport {
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+        var r = ActionReport.ok("\(what) after \(elapsed) ms in \(target.label)")
+        r.payload = ["elapsed_ms": elapsed, "window": target.label]
+        return r
     }
 
     private static func noWindowReason(_ helper: Helper, _ t: Target, _ cause: String) -> String {

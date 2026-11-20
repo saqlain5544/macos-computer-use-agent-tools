@@ -170,13 +170,13 @@ Four suites, all runnable locally:
 
 | Suite | What it covers |
 |---|---|
-| `.build/selftest` | 46 checks: window rules, paths, focus honesty, metrics, surface agreement |
+| `.build/selftest` | 55 checks: window rules, paths, focus honesty, conversions, metrics, surface agreement |
 | `scripts/acceptance.sh` | 27 checks against a real app: bind, drive, focus guard, lifecycle, MCP |
-| `scripts/tool_audit.py` | all 31 tools, asserting an observable effect where one is possible |
+| `scripts/tool_audit.py` | all 32 tools, asserting an observable effect where one is possible |
 | `perf/harness.py` | latency, memory, CPU, and the two invariants that must never break |
 
 That compiles the self-tests, builds the single binary, and refreshes
-`Quiet Driver.app`. The whole app is 792 KB.
+`Quiet Driver.app`. The whole app is under a megabyte.
 
 ## Licence
 
