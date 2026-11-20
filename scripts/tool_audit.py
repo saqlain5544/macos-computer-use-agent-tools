@@ -101,8 +101,22 @@ def calc_reset() -> None:
     post("click_label", label="Clear")
 
 
+def on_screen(agent: str = AUDIT_AGENT) -> bool:
+    """Is the bound window on the Space that is showing?
+
+    Raw mouse events do not reach a window on another Space, so checks that need
+    a real click or drag cannot run there. They are skipped with that reason
+    rather than reported as driver failures.
+    """
+    d = post("status").get("data") or {}
+    return (d.get("target") or {}).get("on_screen") is True
+
+
 def calculator_display() -> str:
-    nodes = get("/tree")["nodes"]
+    # Through the action tool, so it names its agent and acts on the audit's own
+    # binding. The bare GET /tree has no agent and is refused while other agents
+    # have apps bound.
+    nodes = (post("get_accessibility_tree").get("data") or {}).get("nodes") or []
     for n in nodes:
         if n.get("description") == "Edit field":
             return n["value"]
@@ -158,31 +172,39 @@ def main() -> int:
     check("click_label is background", not r["focus_changed"] and not r["real_pointer_moved"])
 
     # --- coordinate press, using the real frame of a key
-    nodes = get("/tree")["nodes"]
+    nodes = (post("get_accessibility_tree").get("data") or {}).get("nodes") or []
     seven = next((n for n in nodes if n.get("description") == "7" and n["role"] == "AXButton"), None)
-    bounds = get("/status")["target"]["bounds"]
+    bounds = ((post("status").get("data") or {}).get("target") or {}).get("bounds") or {}
     if seven:
         fr = seven["frame"]
         lx = fr["x"] - bounds["x"] + fr["w"] / 2
         ly = fr["y"] - bounds["y"] + fr["h"] / 2
         calc_reset()
         before = calculator_display()
-        r = post("click", x=lx, y=ly)
-        # Wait for the display to change rather than assuming a fixed delay.
-        after = before
-        for _ in range(20):
-            after = calculator_display()
-            if after != before:
-                break
-            time.sleep(0.03)
-        check("click by coordinate", r["ok"] and after != before,
-              f"{before!r} -> {after!r}")
-        check("move_cursor is a no-op on the person's pointer",
-              post("move_cursor", x=lx, y=ly)["ok"] and not post("move_cursor", x=lx, y=ly)["real_pointer_moved"])
-        check("scroll", post("scroll", x=lx, y=ly, lines=1)["ok"])
-        check("double_click", post("double_click", x=lx, y=ly)["ok"])
-        check("right_click", post("right_click", x=lx, y=ly)["ok"])
-        check("mouse_drag", post("mouse_drag", x=lx, y=ly, to={"x": lx, "y": ly})["ok"])
+        if on_screen():
+            r = post("click", x=lx, y=ly)
+            before = calculator_display()
+            after = before
+            for _ in range(20):
+                after = calculator_display()
+                if after != before:
+                    break
+                time.sleep(0.03)
+            check("click by coordinate", r["ok"] and after != before,
+                  f"{before!r} -> {after!r}")
+            check("move_cursor is a no-op on the person's pointer",
+                  post("move_cursor", x=lx, y=ly)["ok"] and not post("move_cursor", x=lx, y=ly)["real_pointer_moved"])
+            check("scroll", post("scroll", x=lx, y=ly, lines=1)["ok"])
+            check("double_click", post("double_click", x=lx, y=ly)["ok"])
+            check("right_click", post("right_click", x=lx, y=ly)["ok"])
+        else:
+            for name in ("click by coordinate", "move_cursor is a no-op on the person's pointer",
+                         "scroll", "double_click", "right_click"):
+                skip(name, "window is not on the showing Space; raw mouse cannot reach it")
+        if on_screen():
+            check("mouse_drag", post("mouse_drag", x=lx, y=ly, to={"x": lx, "y": ly})["ok"])
+        else:
+            skip("mouse_drag", "window is not on the showing Space; raw mouse cannot reach it")
     else:
         skip("click by coordinate", "no 7 key in the tree")
 

@@ -68,6 +68,12 @@ struct Target: Equatable {
     var windowTitle: String = ""
     var bounds: Rect = Rect()
     var owner: String = ""
+    /// Is the window on the Space that is currently showing? Raw mouse and
+    /// keyboard events are routed by the window server to visible windows only:
+    /// a window on another Space, or a minimised one, never sees them — while
+    /// accessibility actions still reach it. That difference decides which tools
+    /// can work, so the target carries it.
+    var onScreen: Bool = true
 
     var label: String { windowTitle.isEmpty ? appName : "\(appName) · \(windowTitle)" }
 
@@ -78,6 +84,7 @@ struct Target: Equatable {
             "identity": identity,
             "pid": Int(pid),
             "window": windowTitle,
+            "on_screen": onScreen,
             "window_id": Int(windowId),
             "bounds": bounds.json,
             "owner": owner,

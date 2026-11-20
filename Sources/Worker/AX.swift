@@ -15,6 +15,7 @@ import Cocoa
 import ApplicationServices
 import AVFoundation
 import ScreenCaptureKit
+import Vision
 
 // ScreenCaptureKit asserts unless the process has an AppKit session. Creating
 // it is expensive (~20 MB of AppKit), so it is done lazily, the first time a
@@ -616,6 +617,59 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
+/// Capture a single frame through an SCStream, to a PNG.
+///
+/// `SCScreenshotManager.captureImage` fails on some windows with
+/// "Failed to start stream due to audio/video capture failure" while a real
+/// stream of the same window delivers frames happily — which is why `record`
+/// worked on a window `screenshot` could not see. This takes the first frame
+/// from a stream and stops.
+final class FrameGrabber: NSObject, SCStreamOutput, SCStreamDelegate {
+    private var stream: SCStream?
+    private let path: String
+    private var wrote = false
+    private(set) var error: String?
+    private let sem = DispatchSemaphore(value: 0)
+
+    init(path: String) { self.path = path }
+
+    func attach(_ filter: SCContentFilter, width: Int, height: Int) throws {
+        let cfg = SCStreamConfiguration()
+        cfg.width = width
+        cfg.height = height
+        cfg.showsCursor = false
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "qd.grab"))
+        stream = s
+    }
+
+    func start() async throws { try await stream?.startCapture() }
+
+    func wait(seconds: Double) -> Bool {
+        _ = sem.wait(timeout: .now() + seconds)
+        try? stream?.stopCapture()
+        return wrote
+    }
+
+    func stream(_ s: SCStream, didOutputSampleBuffer b: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, !wrote, b.isValid, let px = CMSampleBufferGetImageBuffer(b) else { return }
+        let ci = CIImage(cvPixelBuffer: px)
+        let ctx = CIContext()
+        guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return }
+        guard let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return }
+        if (try? data.write(to: URL(fileURLWithPath: path))) != nil {
+            wrote = true
+            sem.signal()
+        }
+    }
+
+    func stream(_ s: SCStream, didStopWithError e: Error) {
+        error = "\(e)"
+        sem.signal()
+    }
+}
+
 /// Record one window for `seconds`. Works on the window's own surface, so the
 /// app may be background, occluded, minimised, or on another Space.
 func recordWindow(_ req: [String: Any]) -> [String: Any] {
@@ -667,13 +721,141 @@ func recordWindow(_ req: [String: Any]) -> [String: Any] {
 
 // MARK: - screenshot
 
+/// Capture one window with ScreenCaptureKit, to a PNG.
+///
+/// `screencapture -l` fails with "could not create image from window" for some
+/// windows — Metal-backed canvases, and windows the window server is not
+/// compositing — while ScreenCaptureKit captures their surface just fine. That
+/// is why `record` worked on a window `screenshot` could not see.
+func captureWithScreenCaptureKit(windowId: Int, pid: Int, path: String,
+                                 maxWidth: Double) -> (ok: Bool, w: Int, h: Int, error: String) {
+    ensureAppKit()
+    let sem = DispatchSemaphore(value: 0)
+    var result: (ok: Bool, w: Int, h: Int, error: String) = (false, 0, 0, "capture did not start")
+    Task {
+        defer { sem.signal() }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            // The exact window, never "the app's biggest one": capturing a
+            // different window than the caller asked for is worse than failing,
+            // because every later coordinate is silently wrong.
+            guard let win = content.windows.first(where: {
+                Int($0.windowID) == windowId && $0.frame.width > 120 && $0.frame.height > 80
+            }) else {
+                result = (false, 0, 0, "the window is not capturable by ScreenCaptureKit")
+                return
+            }
+            var w = Int(win.frame.width * 2), h = Int(win.frame.height * 2)
+            if maxWidth > 0, Double(w) > maxWidth {
+                let k = maxWidth / Double(w)
+                w = Int(Double(w) * k); h = Int(Double(h) * k)
+            }
+            let cfg = SCStreamConfiguration()
+            cfg.width = w
+            cfg.height = h
+            cfg.showsCursor = false
+            cfg.scalesToFit = true
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: SCContentFilter(desktopIndependentWindow: win), configuration: cfg)
+            guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+                result = (false, 0, 0, "could not encode the capture")
+                return
+            }
+            try data.write(to: URL(fileURLWithPath: path))
+            result = (true, image.width, image.height, "")
+        } catch {
+            result = (false, 0, 0, "\(error)")
+        }
+    }
+    _ = sem.wait(timeout: .now() + 20)
+    return result
+}
+
+/// Grab one frame through an SCStream (see FrameGrabber).
+func captureFrameWithStream(windowId: Int, path: String) -> (ok: Bool, error: String) {
+    ensureAppKit()
+    let sem = DispatchSemaphore(value: 0)
+    var result: (ok: Bool, error: String) = (false, "did not start")
+    Task {
+        defer { sem.signal() }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            guard let win = content.windows.first(where: { Int($0.windowID) == windowId }) else {
+                result = (false, "the window is not in the shareable list")
+                return
+            }
+            let grab = FrameGrabber(path: path)
+            try grab.attach(SCContentFilter(desktopIndependentWindow: win),
+                            width: Int(win.frame.width * 2), height: Int(win.frame.height * 2))
+            try await grab.start()
+            let ok = grab.wait(seconds: 6)
+            result = (ok, ok ? "" : (grab.error ?? "no frame arrived within 6 s"))
+        } catch {
+            result = (false, "\(error)")
+        }
+    }
+    _ = sem.wait(timeout: .now() + 20)
+    return result
+}
+
+/// Read the text on a window with the Vision framework.
+///
+/// A design tool, a CAD canvas or a game draws everything itself and exposes
+/// almost nothing to accessibility — VectorCraft reports seven nodes for a whole
+/// design app. On-screen text is still there in pixels, so OCR gives an agent
+/// something to aim at: a label, where it is, and how confident the read is.
+func ocrImage(path: String) -> [[String: Any]] {
+    guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return [] }
+    var found: [[String: Any]] = []
+    let request = VNRecognizeTextRequest { req, _ in
+        guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
+        for obs in observations {
+            guard let top = obs.topCandidates(1).first else { continue }
+            let b = obs.boundingBox   // normalised, origin bottom-left
+            found.append([
+                "text": top.string,
+                "confidence": (top.confidence * 100).rounded() / 100,
+                "x": (b.origin.x * Double(image.width)).rounded(),
+                "y": ((1 - b.origin.y - b.size.height) * Double(image.height)).rounded(),
+                "w": (b.size.width * Double(image.width)).rounded(),
+                "h": (b.size.height * Double(image.height)).rounded(),
+            ])
+        }
+    }
+    // Fast recognition: accurate mode took 24 s on a 1512x950 window, which is
+    // worse than useless for an agent waiting on a click. Fast mode reads UI
+    // labels well and returns in a fraction of the time.
+    request.recognitionLevel = .fast
+    request.usesLanguageCorrection = false
+    request.minimumTextHeight = 0
+    let handler = VNImageRequestHandler(cgImage: image, options: [:])
+    try? handler.perform([request])
+    return found
+}
+
 func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
     let wid = req["window_id"] as? Int ?? 0
     let path = req["path"] as? String ?? "/tmp/quiet-driver-window.png"
     guard wid != 0 else { return ["ok": false, "error": "screenshot needs a window_id"] }
     let code = runTool("/usr/sbin/screencapture", ["-x", "-o", "-l", String(wid), path])
-    guard code == 0, FileManager.default.fileExists(atPath: path) else {
-        return ["ok": false, "error": "screencapture exited \(code) for window \(wid)"]
+    if code != 0 || !FileManager.default.fileExists(atPath: path) {
+        // Some windows refuse the window-server capture — a Metal-backed canvas,
+        // a window that is not being composited — but ScreenCaptureKit can read
+        // their surface. This is the difference between a screenshot that works
+        // on a design app and one that does not.
+        let ownerPid = windowsList().first { ($0["window_id"] as? Int) == wid }?["pid"] as? Int ?? 0
+        let shot = captureWithScreenCaptureKit(windowId: wid, pid: ownerPid, path: path, maxWidth: 0)
+        if !shot.ok {
+            // Last resort, and the one that works on windows the compositor
+            // will not hand over: a real stream, first frame, PNG.
+            let st = captureFrameWithStream(windowId: wid, path: path)
+            guard st.ok else {
+                return ["ok": false,
+                        "error": "could not capture window \(wid): screencapture exited \(code), "
+                            + "a screenshot stream failed (\(shot.error)), and a frame stream failed (\(st.error))"]
+            }
+        }
     }
         // Read the image's dimensions from its header. Decoding the whole PNG
         // just to learn its size doubled the cost of a screenshot.
@@ -715,8 +897,46 @@ func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let bytes = (attrs?[.size] as? Int) ?? 0
-    return ["ok": true, "path": path, "bytes": bytes, "width": width, "height": height,
-            "native_scale": scale]
+    var reply: [String: Any] = ["ok": true, "path": path, "bytes": bytes,
+                                "width": width, "height": height, "native_scale": scale]
+    if req["ocr"] as? Bool ?? false {
+        let lines = ocrImage(path: path)
+        reply["text"] = lines.map { $0["text"] as? String ?? "" }
+        reply["text_boxes"] = lines
+    }
+    return reply
+}
+
+/// Read the text on a window without keeping the picture.
+func handleOCR(_ req: [String: Any]) -> [String: Any] {
+    let wid = req["window_id"] as? Int ?? 0
+    guard wid != 0 else { return ["ok": false, "error": "ocr needs a window_id"] }
+    let path = "/tmp/quiet-driver-ocr-\(getpid()).png"
+    let code = runTool("/usr/sbin/screencapture", ["-x", "-o", "-l", String(wid), path])
+    guard code == 0, FileManager.default.fileExists(atPath: path) else {
+        return ["ok": false, "error": "could not capture window \(wid) to read it"]
+    }
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    var lines = ocrImage(path: path)
+
+    // Scale the boxes to window points, so a click can be aimed straight at
+    // them: a retina capture is twice the window's coordinate space.
+    if let win = windowsList().first(where: { ($0["window_id"] as? Int) == wid }),
+       let pw = win["w"] as? Double, pw > 1,
+       let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+       let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+       let pixelW = props[kCGImagePropertyPixelWidth] as? Int, pixelW > 0 {
+        let k = pw / Double(pixelW)
+        if k < 0.999 {
+            for i in lines.indices {
+                for key in ["x", "y", "w", "h"] {
+                    if let v = lines[i][key] as? Double { lines[i][key] = (v * k).rounded() }
+                }
+            }
+        }
+    }
+    return ["ok": true, "width": 0, "height": 0, "lines": lines.map { $0["text"] as? String ?? "" },
+            "boxes": lines, "count": lines.count]
 }
 
 // MARK: - file dialogs
@@ -1694,6 +1914,44 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         return ["ok": true, "sent": sent]
 
+    case "make_window_key":
+        let pid = Int32(req["pid"] as? Int ?? 0)
+        guard pid != 0 else { return ["ok": false, "error": "make_window_key needs a pid"] }
+        let ax = appElement(pid)
+        var changed = false
+        for attr in ["AXMainWindow", "AXFocusedWindow"] {
+            if let raw = axAttr(ax, attr) {
+                let el = raw as! AXUIElement
+                // These only change the app's internal idea of its key window;
+                // the person's frontmost app does not move.
+                if AXUIElementSetAttributeValue(el, "AXMain" as CFString, kCFBooleanTrue).rawValue == 0 { changed = true }
+                if AXUIElementSetAttributeValue(el, "AXFocused" as CFString, kCFBooleanTrue).rawValue == 0 { changed = true }
+            }
+        }
+        return ["ok": true, "changed": changed]
+
+    case "app_info":
+        // What kind of app is this? A canvas app and a web-technology app both
+        // need different handling, and an agent should know before it spends ten
+        // calls discovering it by hand.
+        let pid = Int32(req["pid"] as? Int ?? 0)
+        guard pid != 0 else { return ["ok": false, "error": "app_info needs a pid"] }
+        guard let app = NSRunningApplication(processIdentifier: pid), let bundle = app.bundleURL else {
+            return ["ok": false, "error": "no such app"]
+        }
+        let fm = FileManager.default
+        let frameworks = (try? fm.contentsOfDirectory(atPath: bundle.appendingPathComponent("Contents/Frameworks").path)) ?? []
+        let names = frameworks.map { $0.lowercased() }
+        let webBased = names.contains { $0.contains("electron") || $0.contains("chromium") || $0.contains("tauri") || $0.contains("cef") }
+            || fm.fileExists(atPath: bundle.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path)
+        let ax = appElement(pid)
+        let windowCount = (axAttr(ax, "AXWindows") as? [AXUIElement])?.count ?? 0
+        let hasMainWindow = axAttr(ax, "AXMainWindow") != nil
+        let nodes = ((try? axAttr(ax, "AXChildren")) as? [AXUIElement])?.count ?? 0
+        return ["ok": true, "bundle": bundle.lastPathComponent, "web_based": webBased,
+                "frameworks": Array(names.prefix(8)), "ax_windows": windowCount,
+                "ax_main_window": hasMainWindow, "ax_children": nodes]
+
     case "key", "hotkey":
         let spec = req["key"] as? String ?? ""
         guard let (code, flags, name) = parseChord(spec) else {
@@ -1710,6 +1968,9 @@ func handle(_ req: [String: Any]) -> [String: Any] {
             u.postToPid(pid)
         }
         return ["ok": true, "key": name, "flags": Int(flags.rawValue)]
+
+    case "ocr":
+        return handleOCR(req)
 
     case "screenshot", "capture":
         var r = req

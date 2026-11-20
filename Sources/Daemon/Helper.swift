@@ -355,6 +355,13 @@ extension Helper {
         return asString(v["name"]) ?? app
     }
 
+    func ocr(windowId: UInt32) throws -> (lines: [String], boxes: [[String: Any]], count: Int) {
+        let v = try ok(["cmd": "ocr", "window_id": Int(windowId)])
+        let boxes = (v["boxes"] as? [[String: Any]]) ?? []
+        let lines = (v["lines"] as? [String]) ?? []
+        return (lines, boxes, (v["count"] as? Int) ?? boxes.count)
+    }
+
     func screenshot(windowId: UInt32, path: String, native: Bool = false) throws -> (w: Int, h: Int, bytes: Int, scale: Double) {
         let v = try ok(["cmd": "screenshot", "window_id": Int(windowId), "path": path, "native": native])
         return (asInt(v["width"]) ?? 0, asInt(v["height"]) ?? 0, asInt(v["bytes"]) ?? 0,

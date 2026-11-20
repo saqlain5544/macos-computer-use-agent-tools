@@ -107,6 +107,19 @@ launch_app    { app: "MyEditor" }     # background, no focus change
 # next action re-binds automatically
 ```
 
+## Apps on another Space
+
+A window that is not on the Space the person is looking at still answers
+accessibility (`get_accessibility_tree`, `click_label`, `set_value`) and still
+takes keyboard input (`type_text`, `press_key`), and `screenshot` still shows it.
+What does not reach it is the mouse: `click`, `mouse_drag` and `scroll` are routed
+by the window server to windows that are showing. The driver refuses those with
+that explanation rather than pretending the click landed.
+
+So: on an off-Space window, work through labels and the keyboard. If you need to
+drag a canvas there, the app has to be brought to the person's Space — which is
+their decision, not yours.
+
 ## Waiting
 
 Do not poll. `wait_for` waits on the driver's side, with one call instead of a

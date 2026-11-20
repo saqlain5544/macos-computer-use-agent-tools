@@ -63,7 +63,9 @@ fi
 check "pointer not moved" "$(jqp 'not d["real_pointer_moved"]' < /tmp/qd_acc_click.json)"
 
 # A point beyond the window's own width must be refused.
-WIN_W=$(curl -s -m 10 "$BASE/status" | jqp 'int(d["target"]["bounds"]["w"])')
+# Scoped to this sweep's agent: an unscoped /status has no single target once
+# more than one agent has an app bound.
+WIN_W=$(post '{"tool":"status"}' | jqp 'int(d["data"]["target"]["bounds"]["w"])')
 post "{\"tool\":\"click\",\"x\":$((WIN_W + 120)),\"y\":5}" > /tmp/qd_acc_out.json
 check "out-of-window point refused" "$(jqp 'not d["ok"]' < /tmp/qd_acc_out.json)"
 

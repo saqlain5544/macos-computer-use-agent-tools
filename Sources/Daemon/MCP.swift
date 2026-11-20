@@ -111,7 +111,12 @@ enum MCP {
             Spec(name: "get_text",
                  description: "Read the bound app's text field.",
                  schema: { obj(["agent": agent], []) }),
-            Spec(name: "screenshot",
+            Spec(name: "ocr",
+             description: "Read the text on the bound window, with the position of each line. Use this in apps that draw their own UI (design, CAD, canvas, games) where the accessibility tree has nothing: it tells you the labels you can see and where they are, so you can click them. Coordinates are window-relative and ready to pass to click.",
+             schema: {
+                obj(["agent": agent], [])
+             }),
+        Spec(name: "screenshot",
                  description: "Capture the bound window to a PNG. Works when the app is background, occluded, minimised, on another Space, or hidden. Saved into your workspace unless you give a path.",
                  schema: { obj(["agent": agent,
                                 "path": str("Where to save it; absolute or relative to your workspace")], []) }),
@@ -385,6 +390,36 @@ enum MCP {
             rows.append(line(["mode", payload["mode"] as? String,
                               "watch", (payload["watch_enabled"] as? Bool) == true ? "on" : "off",
                               "actions", "\(payload["actions_total"] as? Int ?? 0)"]))
+        case "bind_app":
+            for key in ["window_id", "pid", "identity", "label"] {
+                if let v = payload[key] { rows.append("\(key): \(v)") }
+            }
+            if let others = payload["other_windows"] as? [[String: Any]], !others.isEmpty {
+                rows.append("other windows you could bind with window_id:")
+                for w in others {
+                    rows.append(line(["  id \(w["window_id"] as? Int ?? 0)",
+                                      "\(w["w"] as? Double ?? 0)x\(w["h"] as? Double ?? 0)",
+                                      (w["title"] as? String).map { "\"\($0)\"" }]))
+                }
+            }
+        case "screenshot":
+            if let boxes = payload["text_boxes"] as? [[String: Any]], !boxes.isEmpty {
+                rows.append("text on screen (click these coordinates):")
+                for b in boxes.prefix(40) {
+                    rows.append(line([(b["text"] as? String) ?? "",
+                                      "@ \(b["x"] as? Double ?? 0),\(b["y"] as? Double ?? 0)"]))
+                }
+            }
+        case "ocr":
+            if let boxes = payload["boxes"] as? [[String: Any]] {
+                if boxes.isEmpty { rows.append("no text found") }
+                for b in boxes.prefix(60) {
+                    rows.append(line([(b["text"] as? String) ?? "",
+                                      "@ \(b["x"] as? Double ?? 0),\(b["y"] as? Double ?? 0)",
+                                      "\(b["w"] as? Double ?? 0)x\(b["h"] as? Double ?? 0)",
+                                      "conf \(b["confidence"] as? Double ?? 0)"]))
+                }
+            }
         case "workspace":
             if let files = payload["files"] as? [[String: Any]] {
                 for f in files.prefix(30) {
@@ -559,7 +594,21 @@ enum MCP {
             group.enter()
             queue.async {
                 defer { group.leave() }
-                guard let reply = postJSON(port: port, path: "/mcp", body: trimmed) else { return }
+                // A daemon restart must not kill the agent's session. If the
+                // call fails to connect, wait for a daemon to come back (it is
+                // usually an upgrade) and retry once, rather than returning
+                // nothing and looking like a hang to the harness.
+                var reply = postJSON(port: port, path: "/mcp", body: trimmed)
+                if reply == nil {
+                    for _ in 0..<80 {
+                        usleep(250_000)
+                        if let fresh = daemonPort() {
+                            reply = postJSON(port: fresh, path: "/mcp", body: trimmed)
+                            if reply != nil { break }
+                        }
+                    }
+                }
+                guard let reply = reply else { return }
                 let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty, let data = (text + "\n").data(using: .utf8) else { return }
                 // One writer at a time: two replies interleaving would corrupt

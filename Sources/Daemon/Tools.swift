@@ -27,7 +27,7 @@ enum Tools {
         "type_text", "type", "press_key", "key", "hotkey", "set_value", "set_caret",
         "click_label", "press_button", "get_text", "set_mode", "pause", "resume",
         "stop_driver", "start_driver", "status", "show_dashboard", "clipboard_read",
-        "clipboard_write", "screenshot", "record", "log_friction", "friction_log",
+        "clipboard_write", "screenshot", "ocr", "record", "log_friction", "friction_log",
         "workspace", "open_file", "close_file", "documents", "wait_for",
         "op_log", "log_stats", "set_watch",
     ]
@@ -49,7 +49,7 @@ enum Tools {
         "show_dashboard", "start_driver", "resume", "stop_driver", "pause", "set_mode",
         "status", "list_windows", "get_desktop_state", "bind_app", "bind", "rebind",
         "launch_app", "launch", "quit_app", "unbind", "get_window_state",
-        "get_accessibility_tree", "screenshot", "record", "open_file", "close_file",
+        "get_accessibility_tree", "screenshot", "ocr", "record", "open_file", "close_file",
         "documents", "log_friction", "friction_log", "workspace", "wait_for",
         "op_log", "log_stats", "set_watch",
     ]
@@ -58,6 +58,20 @@ enum Tools {
     static var routedNames: Set<String> { sessionTools.union(Set(names).subtracting(sessionTools)) }
 
     // MARK: entry
+
+    /// Mouse events are routed by the window server's hit testing, which only
+    /// sees windows on the Space that is showing. A window on another Space never
+    /// receives them, while accessibility actions and *keyboard* events posted to
+    /// the process do (both measured). Saying so is better than returning "click
+    /// delivered" while nothing happens.
+    static func offScreenReason(_ target: Target, _ tool: String) -> String? {
+        guard !target.onScreen else { return nil }
+        return "\(target.label) is not on the current Space, so a raw \(tool) cannot reach it: "
+            + "the window server hit-tests only windows that are showing. Accessibility actions "
+            + "(click_label, set_value, press_key, get_accessibility_tree) and typing do work there. "
+            + "To drive this app by mouse, it has to be on the current Space — the person can show it, "
+            + "or enable watching so the driver may bring it forward. Pass force:true to send it anyway."
+    }
 
     static func execute(
         tool: String,
@@ -215,8 +229,20 @@ enum Tools {
                 let label = t.windowId == 0
                     ? "bound to \(t.appName) as \"\(t.owner)\" (no window yet — use open_file to open a document)"
                     : "bound to \(t.label) as \"\(t.owner)\""
-                var r = ActionReport.ok(label)
-                r.payload = t.json
+                var notes: [String] = []
+                if !t.onScreen {
+                    notes.append("this window is not on the current Space, so clicks and drags cannot "
+                                 + "reach it; click_label and other accessibility actions still work, "
+                                 + "and screenshots work too")
+                }
+                var payload = t.json
+                let others = shared.otherWindows
+                if !others.isEmpty {
+                    payload["other_windows"] = others
+                    notes.append("the app has \(others.count + 1) windows; pass window_id to choose another")
+                }
+                var r = ActionReport.ok(notes.isEmpty ? label : label + " — " + notes.joined(separator: "; "))
+                r.payload = payload
                 return r
             } catch {
                 return ActionReport.err("\(error)")
@@ -311,13 +337,19 @@ enum Tools {
             // give up with what actually failed rather than claiming there is no
             // window, which sends an agent looking for the wrong problem.
             var current = t.windowId
+            var switched = ""
             var lastError = ""
             var shot: (w: Int, h: Int, bytes: Int, scale: Double)?
             for attempt in 0..<4 {
                 if attempt > 0 { usleep(150_000) }
-                if attempt % 2 == 1,
+                // Only replace a window that no longer exists. Capturing a
+                // different window than the caller is bound to would make every
+                // coordinate measured from the picture wrong, silently.
+                if attempt > 0,
+                   !helper.windowsList().contains(where: { $0.windowId == current }),
                    let fresh = Session.rebindExcluding(shared, helper, badWindowId: current, agent) {
                     current = fresh.windowId
+                    switched = " (the bound window had gone; captured \(fresh.label) instead)"
                 }
                 do {
                     shot = try helper.screenshot(windowId: current, path: path,
@@ -332,6 +364,19 @@ enum Tools {
                 r.payload = ["path": path, "width": shot.w, "height": shot.h,
                              "bytes": shot.bytes, "window": t.label,
                              "point_size": true, "native_scale": shot.scale]
+
+                // Canvas apps draw their whole UI: a design tool reports a
+                // handful of accessibility nodes for the entire screen, so a
+                // picture on its own leaves an agent with no names and no
+                // coordinates. Read the text too, and say where it is. This
+                // costs ~200 ms and only for apps that give us nothing.
+                let nodes = ((try? helper.tree(pid: t.pid, max: 60)) ?? []).count
+                if nodes < 20, let read = try? helper.ocr(windowId: current), !read.boxes.isEmpty {
+                    r.payload?["text"] = read.lines
+                    r.payload?["text_boxes"] = read.boxes
+                    r.detail += " · read \(read.count) text line(s) from the pixels (this app exposes only \(nodes) controls)"
+                }
+                if !switched.isEmpty { r.detail = r.detail.replacingOccurrences(of: " to \(path)", with: " to \(path)") + switched }
                 return r
             }
             // Every retry failed. Say what that means for the caller rather than
@@ -342,6 +387,25 @@ enum Tools {
             return ActionReport.err(hasWindow
                 ? "\(t.label) could not be captured (\(lastError)); its window may be closing — bind again or open a document"
                 : noWindowReason(helper, t, lastError))
+
+        case "ocr":
+            // Read what is on screen as text. The route into canvas apps: a
+            // design or CAD tool draws its whole UI, so accessibility has
+            // nothing and screenshots give an agent pixels but no names.
+            let t: Target
+            do { t = try Session.liveTarget(shared, helper, force: false, agent) }
+            catch { return ActionReport.err("\(error)") }
+            do {
+                let read = try helper.ocr(windowId: t.windowId)
+                var r = ActionReport.ok("read \(read.count) line(s) of text from \(t.label)")
+                if read.lines.isEmpty {
+                    r = ActionReport.ok("no text found on \(t.label) — the window may be blank or all graphic")
+                }
+                r.payload = ["lines": read.lines, "boxes": read.boxes, "count": read.count]
+                return r
+            } catch {
+                return ActionReport.err("\(error)")
+            }
 
         case "record":
             let t: Target
@@ -685,6 +749,9 @@ enum Tools {
                 }
             }
 
+            if mode == .background, !(asBool(obj["force"]) ?? false), let reason = offScreenReason(target, tool) {
+                return ActionReport.err(reason)
+            }
             let how: String
             switch tool {
             case "double_click": how = "double"

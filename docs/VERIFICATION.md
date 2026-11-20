@@ -410,7 +410,33 @@ succeeded, just slowly.
 The tool audit and the acceptance sweep both check the refusal path, not just
 the happy one.
 
-## 22. What is *not* verified
+## 22. Apps that are not on the showing Space
+
+The person's desktop here runs the harness fullscreen, so every app an agent binds
+lives on a different Space. That turns out to be the single most important
+constraint for background computer use, so it was measured rather than assumed.
+
+| Operation | Off the showing Space | Evidence |
+|---|---|---|
+| accessibility read (`tree`, `get_text`) | **works** | 158 nodes from CADCraft, text from TextEdit |
+| accessibility action (`click_label`, AXPress) | **works** | Calculator pressed "7" and showed 7; CADCraft tool buttons responded |
+| keyboard (`type_text`, `press_key`) posted to the pid | **works** | TextEdit received "AAAA\nBBBB"; Calculator took "7" |
+| raw mouse (`click`, `mouse_drag`, `scroll`) | **does not reach the app** | identical screenshot hashes before and after a drag; a click in a text view does not move the caret |
+| screenshot | **works, via ScreenCaptureKit** | 1512x949 real pixels from CADCraft; `screencapture -l` fails with "could not create image from window" |
+
+Why: the window server hit-tests mouse events against windows on the Space that is
+showing, so a synthetic click aimed at a window elsewhere is delivered nowhere.
+Keyboard events posted to a process go to its key window, which is why they still
+land. Accessibility bypasses the window server entirely.
+
+What this means for an agent: on a window off the current Space, drive it by
+accessibility and keyboard; screenshots still show what it looks like. To drive it
+by mouse it has to be on the showing Space, which is the person's decision — the
+driver says exactly that instead of reporting "click delivered" while nothing
+happens. `screenshot` falls back to a ScreenCaptureKit stream, which captures
+windows on other Spaces and Metal-backed canvases that `screencapture` cannot see.
+
+## 23. What is *not* verified
 
 Honesty about the edges:
 

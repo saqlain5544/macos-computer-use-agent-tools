@@ -17,6 +17,12 @@ final class Shared {
     /// script, the dashboard) means "the app I am working with", which is the
     /// last one bound rather than whatever happens to be at a fixed key.
     private var _lastBound: String?
+    /// Windows the last bind could have chosen instead of the one it took.
+    private var _otherWindows: [[String: Any]] = []
+    var otherWindows: [[String: Any]] {
+        get { locked { _otherWindows } }
+        set { locked { _otherWindows = newValue } }
+    }
     private var _port: UInt16 = 0
     private var _fps: Double = 0
     private var _frames: UInt64 = 0
@@ -418,10 +424,22 @@ enum Session {
 
         let target = Target(
             pid: pid, identity: identity, appName: win.owner, windowId: win.windowId,
-            windowTitle: win.title, bounds: win.bounds, owner: owner)
+            windowTitle: win.title, bounds: win.bounds, owner: owner, onScreen: win.onScreen)
 
         shared.setTarget(target, for: owner)
         shared.noteAgent(owner)
+        // If the app had more than one window to choose from, say which one was
+        // picked and what the others are. Apps put launchers, palettes and
+        // splash screens beside their main window, and guessing wrong is
+        // invisible until every later click lands somewhere else.
+        if candidates.count > 1 {
+            shared.otherWindows = candidates
+                .filter { $0.windowId != win.windowId && isUsableWindow($0) }
+                .map { ["window_id": $0.windowId, "title": $0.title,
+                        "w": $0.bounds.w, "h": $0.bounds.h] }
+        } else {
+            shared.otherWindows = []
+        }
         shared.tree = (try? helper.tree(pid: pid, max: 400)) ?? []
         shared.record(tool: "bind", detail: "bound to \(win.label)", ok: true, mode: shared.mode, focusChanged: false)
 
@@ -512,11 +530,13 @@ enum Session {
             target.bounds = win.bounds
             target.windowId = win.windowId
             target.windowTitle = win.title
+            target.onScreen = win.onScreen
             shared.boundsRefreshedAt = nowMs
             var fresh = shared.effectiveTarget(for: agent) ?? target
             fresh.bounds = win.bounds
             fresh.windowId = win.windowId
             fresh.windowTitle = win.title
+            fresh.onScreen = win.onScreen
             shared.setTarget(fresh, for: shared.bindingKey(for: agent))
             return target
         }
