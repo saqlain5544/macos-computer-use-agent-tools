@@ -301,8 +301,10 @@ def main() -> int:
     r = mcp("status")
     check("MCP tool call", r["result"]["isError"] is False)
     r = mcp("screenshot", agent="audit")
-    kinds = [c["type"] for c in r["result"]["content"]]
-    check("MCP returns the screenshot inline", "image" in kinds, str(kinds))
+    content = r["result"]["content"]
+    kinds = [c["type"] for c in content]
+    check("MCP returns the screenshot inline", "image" in kinds,
+          str(kinds) if "image" in kinds else str(content)[:90])
     r = mcp("nope")
     check("MCP rejects an unknown tool", "error" in r)
     r = mcp("click", x=-50, y=-50)

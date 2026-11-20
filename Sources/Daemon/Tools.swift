@@ -174,11 +174,19 @@ enum Tools {
             let window = asInt(obj["window_id"]).flatMap { UInt32(exactly: $0) }
             let owner = agent.isEmpty ? "default" : agent
             let takeover = asBool(obj["takeover"]) ?? false
-            let previous = shared.target?.identity
+            // The binding that this agent held before, not the session's: with
+            // per-agent bindings a session-wide lookup leaves a worker behind
+            // for every app an agent hops through.
+            let previous = shared.effectiveTarget(for: agent)?.identity
             do {
                 let t = try Session.bind(helper, shared, pool, selector: selector,
                                          window: window, owner: owner, takeover: takeover)
-                if let prev = previous, prev != t.identity { pool.release(prev) }
+                // Reap the old app's worker, but only if no other agent still
+                // holds that app.
+                if let prev = previous, prev != t.identity,
+                   shared.owner(ofIdentity: prev, excluding: agent) == nil {
+                    pool.release(prev)
+                }
                 _ = pool.forApp(t.identity)
                 let label = t.windowId == 0
                     ? "bound to \(t.appName) as \"\(t.owner)\" (no window yet — use open_file to open a document)"
@@ -242,7 +250,9 @@ enum Tools {
             // app, and its worker must survive.
             let released = shared.releaseTarget(for: agent)
             shared.tree = []
-            if let id = released { pool.release(id) }
+            if let id = released, shared.owner(ofIdentity: id, excluding: agent) == nil {
+                pool.release(id)
+            }
             return ActionReport.ok("unbound")
 
         case "get_window_state", "get_accessibility_tree":

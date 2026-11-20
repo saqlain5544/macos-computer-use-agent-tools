@@ -17,6 +17,7 @@ import argparse
 import json
 import multiprocessing
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -189,6 +190,24 @@ def main() -> int:
     check("two agents can hold two apps at once",
           len(bindings) >= 2 and len(set(bindings.values())) >= 2,
           str(bindings))
+
+    # An agent that hops between apps must not leave a worker behind for every
+    # app it visited: each is a 13 MB process.
+    def worker_count() -> int:
+        pid = open(STATE).read().split("\n")[2].strip()
+        out = subprocess.run(["/usr/bin/pgrep", "-P", pid],
+                             capture_output=True, text=True).stdout
+        return len([line for line in out.splitlines() if line.strip()])
+
+    before = worker_count()
+    for _ in range(4):
+        for app in ["Calculator", "TextEdit"]:
+            post("bind_app", app=app, agent="hopper", takeover=True)
+            time.sleep(0.1)
+    time.sleep(0.5)
+    after = worker_count()
+    check("hopping apps does not leak workers", after <= before + 1,
+          f"{before} workers before, {after} after")
 
     # Ownership under contention: release every binding on the app, then four
     # agents reach for it at once. Exactly one must win.
