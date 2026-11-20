@@ -85,6 +85,7 @@ enum Tools {
         let original = Rect(x: target.bounds.x, y: target.bounds.y, w: target.bounds.w, h: target.bounds.h)
         var fresh = shared.effectiveTarget(for: agent) ?? target
         fresh.originalFrame = original
+        fresh.wasFullscreen = staged.wasFullscreen
         fresh.bounds = Rect(x: staged.frame.origin.x, y: staged.frame.origin.y,
                             w: staged.frame.width, h: staged.frame.height)
         fresh.onScreen = true
@@ -368,6 +369,7 @@ enum Tools {
             guard let error = staged.error.map({ $0 }) else {
                 var fresh = shared.effectiveTarget(for: agent) ?? t
                 fresh.originalFrame = Rect(x: t.bounds.x, y: t.bounds.y, w: t.bounds.w, h: t.bounds.h)
+                fresh.wasFullscreen = staged.wasFullscreen
                 fresh.bounds = Rect(x: staged.frame.origin.x, y: staged.frame.origin.y,
                                     w: staged.frame.width, h: staged.frame.height)
                 fresh.onScreen = true
@@ -388,9 +390,11 @@ enum Tools {
             guard let original = t.originalFrame else {
                 return ActionReport.ok("\(t.label) was not staged by the driver")
             }
-            let ok = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid, frame: original.cgRect, helper: helper)
+            let ok = WorkDisplay.shared.restore(windowId: t.windowId, pid: t.pid, frame: original.cgRect,
+                                                helper: helper, fullscreen: t.wasFullscreen)
             var fresh = shared.effectiveTarget(for: agent) ?? t
             fresh.originalFrame = nil
+            fresh.wasFullscreen = false
             fresh.bounds = original
             shared.setTarget(fresh, for: shared.bindingKey(for: agent))
             return ActionReport.ok(ok

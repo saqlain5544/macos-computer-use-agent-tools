@@ -364,12 +364,16 @@ extension Helper {
 
     /// Move and resize a window through accessibility: no activation, no Space
     /// change, the window is just told where to be.
-    @discardableResult
     func moveWindow(windowId: UInt32, pid: Int32,
-                    x: Double, y: Double, w: Double, h: Double) throws -> Bool {
+                    x: Double, y: Double, w: Double, h: Double) throws -> (ok: Bool, wasFullscreen: Bool) {
         let v = try ok(["cmd": "move_window", "pid": Int(pid), "window_id": Int(windowId),
                         "x": x, "y": y, "w": w, "h": h])
-        return asBool(v["ok"]) ?? false
+        return (asBool(v["ok"]) ?? false, asBool(v["was_fullscreen"]) ?? false)
+    }
+
+    func setWindowFullscreen(windowId: UInt32, pid: Int32, fullscreen: Bool) {
+        _ = try? ok(["cmd": "set_fullscreen", "pid": Int(pid), "window_id": Int(windowId),
+                     "fullscreen": fullscreen])
     }
 
     /// Read a window's frame. Never moves it: a frame request must not have

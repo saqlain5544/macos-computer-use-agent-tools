@@ -64,8 +64,9 @@ final class WorkDisplay {
     }
 
     /// Put a window on the work display. Returns the frame it was moved to.
-    func stage(windowId: UInt32, size: CGSize, helper: Helper, pid: Int32) -> (frame: CGRect, error: String?) {
-        guard ensure() else { return (.zero, failure ?? "no work display") }
+    func stage(windowId: UInt32, size: CGSize, helper: Helper, pid: Int32) -> (frame: CGRect, error: String?, wasFullscreen: Bool) {
+        guard ensure() else { return (.zero, failure ?? "no work display", false) }
+        var wasFullscreen = false
         let b = bounds
         // Leave a margin so window shadows and resize handles stay on the display.
         let w = min(max(size.width, 200), b.width - 40)
@@ -74,26 +75,30 @@ final class WorkDisplay {
         do {
             let moved = try helper.moveWindow(windowId: windowId, pid: pid,
                                               x: origin.x, y: origin.y, w: w, h: h)
-            guard moved else {
-                return (.zero, "the app would not let the driver move its window")
+            guard moved.ok else {
+                return (.zero, "the app would not let the driver move its window", false)
             }
+            wasFullscreen = moved.wasFullscreen
             // Report the frame the window actually has: an app may refuse the
             // resize while still accepting the move.
             let frame = (try? helper.windowFrame(windowId: windowId, pid: pid)) ?? Rect()
             let actual = frame.w > 1
                 ? CGRect(x: frame.x, y: frame.y, width: frame.w, height: frame.h)
                 : CGRect(origin: origin, size: CGSize(width: w, height: h))
-            return (actual, nil)
+            return (actual, nil, wasFullscreen)
         } catch {
-            return (.zero, "\(error)")
+            return (.zero, "\(error)", false)
         }
     }
 
     /// Put a window back where it was.
-    func restore(windowId: UInt32, pid: Int32, frame: CGRect, helper: Helper) -> Bool {
-        (try? helper.moveWindow(windowId: windowId, pid: pid,
-                                x: frame.origin.x, y: frame.origin.y,
-                                w: frame.width, h: frame.height)) ?? false
+    func restore(windowId: UInt32, pid: Int32, frame: CGRect, helper: Helper,
+                 fullscreen: Bool = false) -> Bool {
+        let moved = (try? helper.moveWindow(windowId: windowId, pid: pid,
+                                            x: frame.origin.x, y: frame.origin.y,
+                                            w: frame.width, h: frame.height))
+        if fullscreen { helper.setWindowFullscreen(windowId: windowId, pid: pid, fullscreen: true) }
+        return moved?.ok ?? false
     }
 
     // MARK: - the private API

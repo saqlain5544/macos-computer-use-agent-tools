@@ -1990,6 +1990,21 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         return ["ok": true, "sent": sent]
 
+    case "set_fullscreen":
+        let pid = Int32(req["pid"] as? Int ?? 0)
+        let wid = req["window_id"] as? Int ?? 0
+        let want = req["fullscreen"] as? Bool ?? false
+        let ax = appElement(pid)
+        var windows: [AXUIElement] = []
+        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { windows = ws }
+        if let mw = axAttr(ax, "AXMainWindow") { windows.append(mw as! AXUIElement) }
+        var w = windows.first
+        if wid != 0 { for c in windows where Int(axWindowId(c)) == wid { w = c } }
+        guard let win = w else { return ["ok": false, "error": "no window"] }
+        let rc = AXUIElementSetAttributeValue(win, "AXFullScreen" as CFString,
+                                              want ? kCFBooleanTrue : kCFBooleanFalse)
+        return ["ok": rc == .success, "rc": Int(rc.rawValue)]
+
     case "window_frame":
         // Read-only: a frame request must never move anything.
         let pid = Int32(req["pid"] as? Int ?? 0)
@@ -2030,6 +2045,22 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         guard let w = target else { return ["ok": false, "error": "no window"] }
 
+        // A fullscreen window cannot be repositioned: macOS keeps it on its own
+        // Space at the display's size, and every AX position change fails with
+        // kAXErrorFailure. Leave fullscreen first — the same thing the zoom
+        // button does — and remember it so it can be restored.
+        var wasFullscreen = false
+        if let fs = axAttr(w, "AXFullScreen"), CFBooleanGetValue(fs as! CFBoolean) {
+            wasFullscreen = true
+            if let zb = axAttr(w, "AXZoomButton") {
+                _ = AXUIElementPerformAction(zb as! AXUIElement, kAXPressAction as CFString)
+                usleep(500_000)
+            } else {
+                _ = AXUIElementSetAttributeValue(w, "AXFullScreen" as CFString, kCFBooleanFalse)
+                usleep(500_000)
+            }
+        }
+
         var point = CGPoint(x: (req["x"] as? Double) ?? 0, y: (req["y"] as? Double) ?? 0)
         let size = CGSize(width: (req["w"] as? Double) ?? 0, height: (req["h"] as? Double) ?? 0)
         // Position first, then size: resizing before moving can push the window
@@ -2053,6 +2084,7 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         // A window that refuses to resize is still movable, and moving it is what
         // makes it clickable. Only the position has to work.
         return ["ok": posRc == .success && got.origin.x.isFinite,
+                "was_fullscreen": wasFullscreen,
                 "resized": sizeRc == .success,
                 "position_error": Int(posRc.rawValue), "size_error": Int(sizeRc.rawValue),
                 "x": got.origin.x, "y": got.origin.y, "w": got.size.width, "h": got.size.height]
