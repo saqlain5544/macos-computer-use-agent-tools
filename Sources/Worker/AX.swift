@@ -84,11 +84,17 @@ func matchControl(_ controls: [(AXUIElement, String)], _ label: String) -> (elem
     let wanted = words(label)
     if let i = controls.firstIndex(where: { $0.1 == label }) { return (controls[i].0, controls[i].1, i) }
     if let i = controls.firstIndex(where: { $0.1.lowercased() == needle }) { return (controls[i].0, controls[i].1, i) }
+    // A control name often carries extra words the caller left out — "Rectangle
+    // Tool (M)" for "Rectangle Tool" — so match if either side's words are
+    // contained in the other's, and prefer the closest fit.
     let subset = controls.enumerated().filter { c in
         let w = words(c.element.1)
-        return !w.isEmpty && w.isSubset(of: wanted)
+        return !w.isEmpty && (w.isSubset(of: wanted) || wanted.isSubset(of: w))
     }
     if subset.count == 1 { return (subset[0].element.0, subset[0].element.1, subset[0].offset) }
+    if let best = subset.min(by: { words($0.element.1).count < words($1.element.1).count }) {
+        return (best.element.0, best.element.1, best.offset)
+    }
     if let aliases = symbolAliases[label.trimmingCharacters(in: .whitespaces)] {
         for alias in aliases {
             if let i = controls.firstIndex(where: { $0.1.lowercased() == alias }) {
@@ -138,6 +144,10 @@ func controlAt(pid: Int32, x: Double, y: Double) -> AXUIElement? {
     }
     if let mw = axAttr(ax, "AXMainWindow") { scan(mw as! AXUIElement, 0) }
     if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { for w in ws { scan(w, 0) } }
+    // Some apps put toolbars and floating panels directly under the application
+    // element, outside every window (VectorCraft does). Not scanning there made
+    // click_label report "only Home and Search commands available".
+    if let kids = axAttr(ax, "AXChildren") as? [AXUIElement] { for k in kids { scan(k, 0) } }
     controlCache[pid] = (controls, controls.map { axFrame($0.0) }, Date())
     return fromCache()
 }
@@ -1864,6 +1874,58 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         guard let av = AXValueCreate(.cfRange, &r) else { return ["ok": false, "error": "bad range"] }
         let rc = AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, av).rawValue
         return ["ok": rc == 0, "rc": Int(rc), "location": loc, "length": len]
+
+    case "click_hid", "drag_hid", "scroll_hid":
+        // Real window-server events. Some apps (VectorCraft, many AppKit canvas
+        // apps) ignore events posted to their process and only react to events
+        // the window server delivers; that path moves the hardware cursor, so it
+        // is saved and put back before returning.
+        let before = CGEvent(source: nil)?.location ?? .zero
+        defer { CGWarpMouseCursorPosition(before) }
+        let src = CGEventSource(stateID: .hidSystemState)
+        if cmd == "click_hid" {
+            let p = CGPoint(x: num("x"), y: num("y"))
+            let button = req["button"] as? String == "right" ? CGEventType.rightMouseDown : CGEventType.leftMouseDown
+            let upType = button == .rightMouseDown ? CGEventType.rightMouseUp : CGEventType.leftMouseUp
+            CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+            usleep(15_000)
+            CGEvent(mouseEventSource: src, mouseType: button, mouseCursorPosition: p, mouseButton: button == .rightMouseDown ? .right : .left)?.post(tap: .cghidEventTap)
+            usleep(30_000)
+            CGEvent(mouseEventSource: src, mouseType: upType, mouseCursorPosition: p, mouseButton: button == .rightMouseDown ? .right : .left)?.post(tap: .cghidEventTap)
+            if req["double"] as? Bool ?? false {
+                usleep(60_000)
+                CGEvent(mouseEventSource: src, mouseType: button, mouseCursorPosition: p, mouseButton: button == .rightMouseDown ? .right : .left)?.post(tap: .cghidEventTap)
+                usleep(30_000)
+                CGEvent(mouseEventSource: src, mouseType: upType, mouseCursorPosition: p, mouseButton: button == .rightMouseDown ? .right : .left)?.post(tap: .cghidEventTap)
+            }
+            return ["ok": true, "hid": true]
+        }
+        if cmd == "drag_hid" {
+            let a = CGPoint(x: num("x1"), y: num("y1"))
+            let b = CGPoint(x: num("x2"), y: num("y2"))
+            CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: a, mouseButton: .left)?.post(tap: .cghidEventTap)
+            usleep(20_000)
+            CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: a, mouseButton: .left)?.post(tap: .cghidEventTap)
+            usleep(30_000)
+            for i in 1...16 {
+                let t = Double(i) / 16.0
+                let p = CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+                CGEvent(mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+                usleep(15_000)
+            }
+            CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: b, mouseButton: .left)?.post(tap: .cghidEventTap)
+            return ["ok": true, "hid": true]
+        }
+        let p = CGPoint(x: num("x"), y: num("y"))
+        let lines = Int(num("lines"))
+        for _ in 0..<max(1, abs(lines)) {
+            let wheel = CGEvent(scrollWheelEvent2Source: src, units: .line,
+                                wheelCount: 1, wheel1: Int32(lines > 0 ? -1 : 1), wheel2: 0, wheel3: 0)
+            wheel?.location = p
+            wheel?.post(tap: .cghidEventTap)
+            usleep(20_000)
+        }
+        return ["ok": true, "hid": true]
 
     case "click", "double_click", "right_click", "move":
         let p = CGPoint(x: num("x"), y: num("y"))

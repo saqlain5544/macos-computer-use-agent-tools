@@ -482,6 +482,22 @@ extension Helper {
     func activate(pid: Int32) throws { _ = try ok(["cmd": "activate", "pid": Int(pid)]) }
     func raiseWindow(pid: Int32) throws { _ = try ok(["cmd": "raise_window", "pid": Int(pid)]) }
 
+    /// A real window-server click. Works in apps that ignore events posted to
+    /// their process, and puts the hardware cursor back where it was.
+    func clickHID(pid: Int32, x: Double, y: Double, button: String = "left", double: Bool = false) throws {
+        _ = try ok(["cmd": "click_hid", "pid": Int(pid), "x": x, "y": y,
+                    "button": button, "double": double])
+    }
+
+    func dragHID(pid: Int32, from: (Double, Double), to: (Double, Double)) throws {
+        _ = try ok(["cmd": "drag_hid", "pid": Int(pid),
+                    "x1": from.0, "y1": from.1, "x2": to.0, "y2": to.1])
+    }
+
+    func scrollHID(pid: Int32, x: Double, y: Double, lines: Int) throws {
+        _ = try ok(["cmd": "scroll_hid", "pid": Int(pid), "x": x, "y": y, "lines": lines])
+    }
+
     func click(pid: Int32, x: Double, y: Double, how: String) throws {
         _ = try ok(["cmd": "click", "pid": Int(pid), "x": x, "y": y, "button": how])
     }
