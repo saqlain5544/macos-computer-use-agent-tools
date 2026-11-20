@@ -1139,7 +1139,18 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         let pid = target.processIdentifier
         let docs = windowMenuDocuments(appElement(pid)) ?? []
-        if !sheetTitle.isEmpty || !docs.isEmpty {
+        // Whether there is work to lose is decided by the window server, not by
+        // the Window menu: a backgrounded app often reports no menu documents
+        // while still showing a document window, and force-terminating then
+        // would throw away the person's unsaved work.
+        let usableWindows: [[String: Any]] = windowsList().filter { w in
+            let ownerPid = (w["pid"] as? Int) ?? 0
+            let layer = (w["layer"] as? Int) ?? -1
+            let width = (w["w"] as? Double) ?? 0
+            let height = (w["h"] as? Double) ?? 0
+            return ownerPid == Int(pid) && layer == 0 && width >= 120 && height >= 80
+        }
+        if !sheetTitle.isEmpty || !docs.isEmpty || !usableWindows.isEmpty {
             return [
                 "ok": false,
                 "requested": asked,
@@ -1152,9 +1163,21 @@ func handle(_ req: [String: Any]) -> [String: Any] {
                 "documents": docs,
             ]
         }
-        // No documents and no sheets, yet it is still running: there is no work
-        // to lose, so a forced terminate is safe and better than leaving a
-        // zombie the agent cannot get past.
+        // Still running. A forced terminate is the only thing left, but it can
+        // throw away work the driver cannot see (an app may auto-save on quit,
+        // or hold state in memory). Never do that on the agent's behalf: only
+        // when the caller explicitly asked for force.
+        let force = req["force"] as? Bool ?? false
+        if !force {
+            return [
+                "ok": false,
+                "requested": asked,
+                "terminated": false,
+                "name": target.localizedName ?? "",
+                "error": "\(target.localizedName ?? "the app") did not quit; pass force:true to terminate it anyway, or close its documents first",
+                "hint": "force:true discards anything the app has not saved",
+            ]
+        }
         _ = target.forceTerminate()
         let hardDeadline = Date().addingTimeInterval(3.0)
         while !target.isTerminated && Date() < hardDeadline { usleep(100_000) }

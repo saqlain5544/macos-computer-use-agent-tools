@@ -903,7 +903,8 @@ fn run_tool(
                 .as_ref()
                 .map(|t| t.identity.eq_ignore_ascii_case(&name) || t.app_name.eq_ignore_ascii_case(&name))
                 .unwrap_or(false);
-            let result = helper::quit_app(helper, &name);
+            let force = obj.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+            let result = helper::quit_app(helper, &name, force);
             if was_bound {
                 if let Some(t) = shared.lock().unwrap().target.as_mut() {
                     t.pid = 0;
@@ -960,14 +961,26 @@ fn run_tool(
                 Err(e) => return ActionReport::err(e),
             };
             let path_str = path.to_string_lossy().into_owned();
+            // A window the window server still lists but that is already closed
+            // cannot be captured. That ghost clears within a frame or two, so
+            // re-resolve and retry rather than reporting the capture tool's
+            // error, which tells the agent nothing.
             let mut attempt = helper::screenshot(helper, t.window_id, &path_str);
-            if attempt.is_err() {
-                // The window may be listed but already dead. Re-resolve once.
+            let mut last: Option<String> = None;
+            for _ in 0..3 {
+                if attempt.is_ok() {
+                    break;
+                }
+                last = attempt.err();
+                std::thread::sleep(std::time::Duration::from_millis(150));
                 match session::rebind(helper, shared) {
                     Ok(fresh) => attempt = helper::screenshot(helper, fresh.window_id, &path_str),
-                    Err(e) => return ActionReport::err(no_window_reason(helper, &t, e)),
+                    Err(e) => {
+                        return ActionReport::err(no_window_reason(helper, &t, e));
+                    }
                 }
             }
+            let _ = last;
             return match attempt {
                 Ok((w, h, bytes)) => {
                     let mut r = ActionReport::ok(format!(
@@ -997,7 +1010,11 @@ fn run_tool(
             let seconds = num(obj, "seconds").unwrap_or(3.0).clamp(0.5, 60.0);
             let path_str = path.to_string_lossy().into_owned();
             let mut attempt = helper::record(helper, t.pid, seconds, &path_str);
-            if attempt.is_err() {
+            for _ in 0..2 {
+                if attempt.is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
                 if let Err(e) = session::rebind(helper, shared) {
                     return ActionReport::err(no_window_reason(helper, &t, e));
                 }

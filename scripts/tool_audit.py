@@ -221,15 +221,14 @@ def main() -> int:
     post("launch_app", app="TextEdit")
     time.sleep(1)
     r = post("quit_app", app="TextEdit")
-    if not r["ok"]:
-        # A slow app may still be on its way out; give it one more chance before
-        # calling it a failure.
-        time.sleep(2)
-        r = post("quit_app", app="TextEdit")
     err = r.get("error") or ""
-    check("quit_app (or an explained refusal)",
-          r["ok"] or "save" in err or "unsaved" in err,
+    check("quit_app, or a refusal that explains itself",
+          r["ok"] or "did not quit" in err or "save" in err,
           (err or "quit")[:60])
+    if not r["ok"]:
+        # The escape hatch must exist and be explicit.
+        r = post("quit_app", app="TextEdit", force=True)
+        check("quit_app force terminates", r["ok"], (r.get("error") or "")[:40])
     time.sleep(1)
     r = post("type_text", text="x")
     check("action on a quit app is refused", not r["ok"])

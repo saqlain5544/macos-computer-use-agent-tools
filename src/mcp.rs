@@ -113,8 +113,14 @@ fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "quit_app",
-            description: "Quit an app by name or bundle id.",
-            schema: || obj(json!({ "app": s("App name or bundle id") }), vec!["app"]),
+            description: "Quit an app by name or bundle id. Refuses rather than discarding unsaved work; pass force only when the person has agreed to lose it.",
+            schema: || obj(
+                json!({
+                    "app": s("App name or bundle id"),
+                    "force": b("Terminate even if the app does not quit on its own (discards unsaved work)")
+                }),
+                vec!["app"],
+            ),
         },
         ToolSpec {
             name: "list_windows",
