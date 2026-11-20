@@ -148,6 +148,27 @@ func textElement(_ ax: AXUIElement) -> AXUIElement? {
     return nil
 }
 
+/// Run a short-lived tool, without Foundation's `Process`.
+///
+/// `Process.waitUntilExit()` integrates with a run loop that this helper does
+/// not have, so it polls: every `screencapture` came back ~65 ms later than the
+/// tool itself took. `posix_spawn` + `waitpid` is a direct fork/exec and blocks
+/// exactly as long as the child runs.
+@discardableResult
+func runTool(_ path: String, _ args: [String]) -> Int32 {
+    var argv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
+    argv.insert(strdup(path), at: 0)
+    argv.append(nil)
+    defer { for a in argv where a != nil { free(a) } }
+
+    var pid: pid_t = 0
+    let rc = posix_spawn(&pid, path, nil, nil, argv, environ)
+    guard rc == 0 else { return -1 }
+    var status: Int32 = 0
+    while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+    return status >> 8
+}
+
 /// The element under a screen point, belonging to `pid`.
 ///
 /// `AXUIElementCopyElementAtPosition` is one call into the window server and
@@ -576,14 +597,10 @@ func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
     let wid = req["window_id"] as? Int ?? 0
     let path = req["path"] as? String ?? "/tmp/quiet-driver-window.png"
     guard wid != 0 else { return ["ok": false, "error": "screenshot needs a window_id"] }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-    p.arguments = ["-x", "-o", "-l", String(wid), path]
-    do {
-        try p.run(); p.waitUntilExit()
-        guard p.terminationStatus == 0, FileManager.default.fileExists(atPath: path) else {
-            return ["ok": false, "error": "screencapture exited \(p.terminationStatus) for window \(wid)"]
-        }
+    let code = runTool("/usr/sbin/screencapture", ["-x", "-o", "-l", String(wid), path])
+    guard code == 0, FileManager.default.fileExists(atPath: path) else {
+        return ["ok": false, "error": "screencapture exited \(code) for window \(wid)"]
+    }
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let bytes = (attrs?[.size] as? Int) ?? 0
         // Read the image's dimensions from its header. Decoding the whole PNG
@@ -595,10 +612,7 @@ func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
             width = (props[kCGImagePropertyPixelWidth] as? Int) ?? 0
             height = (props[kCGImagePropertyPixelHeight] as? Int) ?? 0
         }
-        return ["ok": true, "path": path, "bytes": bytes, "width": width, "height": height]
-    } catch {
-        return ["ok": false, "error": "\(error)"]
-    }
+    return ["ok": true, "path": path, "bytes": bytes, "width": width, "height": height]
 }
 
 // MARK: - file dialogs
