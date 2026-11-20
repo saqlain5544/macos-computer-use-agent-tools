@@ -279,7 +279,28 @@ there would describe the lock and not the driver.
 unlocked. A run against a locked screen is not comparable and the harness
 rejects it.
 
-## 15. What is *not* verified
+## 15. The Swift stack, checked against the same suites
+
+The Rust half was removed after the Swift implementation passed the existing
+suites unchanged: **48/48 tool-audit checks**, **27/27 acceptance checks**, and
+a clean harness run with zero focus moves and zero pointer moves. The point of
+running the same suites rather than writing new ones is that the external
+contract is what had to survive.
+
+| | Rust + Swift | Swift only |
+|---|---|---|
+| binary | 12 MB | 792 KB |
+| build | cargo + swiftc, ~30 s | swiftc, ~2 s |
+| toolchains | two | one |
+| click_label p50 | 2.5 ms | 2.9 ms |
+| screenshot p50 | 70 ms | 75 ms |
+| daemon RSS | 10.3 MB | 14.6 MB |
+| workers | 13-14 MB | 13-14 MB |
+
+The daemon is 4 MB heavier because the Swift runtime is in-process; the workers,
+which hold the accessibility connections, cost the same.
+
+## 16. What is *not* verified
 
 Honesty about the edges:
 
@@ -342,7 +363,7 @@ It now passes 48/48 repeatedly from any starting state.
 ## How to re-run these checks
 
 ```bash
-cargo test                  # unit tests
+./.build/selftest           # unit tests
 ./scripts/acceptance.sh     # real app: bind, drive, focus guard, lifecycle
 ./scripts/tool_audit.py     # every tool, asserting an effect
 ./perf/harness.py           # latency, memory, invariants

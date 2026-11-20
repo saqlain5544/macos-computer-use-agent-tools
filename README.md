@@ -8,7 +8,7 @@ app may be frontmost, behind other windows, minimised, on another Space, or
 hidden. The person's pointer never moves, their focus is never taken, and
 their window order never changes.
 
-> Beta. v0.1.0. Expect the edges to be rough; that is what the friction log
+> Beta. v0.2.0. Expect the edges to be rough; that is what the friction log
 > is for.
 
 ---
@@ -17,8 +17,9 @@ their window order never changes.
 
 | Path | What it is |
 |---|---|
-| `src/` | the driver: Rust for the control link and the dashboard, Swift for every macOS call |
-| `swift/helper.swift` | the whole macOS layer: Accessibility, per-process events, windows, capture, recording |
+| `Sources/Worker/AX.swift` | the whole macOS layer: Accessibility, per-process events, windows, capture, recording |
+| `Sources/Daemon/` | the daemon: HTTP + MCP surfaces, binding, worker pool, metrics, dashboard |
+| `Sources/main.swift` | one binary, five jobs: daemon, worker, MCP bridge, dashboard, viewer |
 | `skills/` | the two skills an agent loads: how to drive, and what to do when it goes wrong |
 | `plugin/` | the DeepSeek Harness plugin: an MCP bundle that exposes the driver to the agent |
 | `docs/` | how it works, what was measured, and what is still missing |
@@ -26,7 +27,7 @@ their window order never changes.
 ## Quick start
 
 ```bash
-./build.sh                     # helper + driver + app bundle
+./build.sh                     # self-tests + binary + app bundle
 open -a "Quiet Driver"         # starts the service; the window is optional
 cat ~/.quiet-driver/port       # port, url, daemon pid
 ```
@@ -141,13 +142,16 @@ without them, and no agent can grant them — that is the right boundary.
 ## Layout
 
 ```
-src/server.rs      the loopback HTTP + MCP server
-src/session.rs     the binding, ownership, identity-based rebind
-src/helper.rs      the Rust client for the Swift helper
-src/workspace.rs   per-agent artefact directories and the friction log
-src/mcp.rs         the MCP surface
-src/desktop.rs     the dashboard (a viewer, not a requirement)
-swift/helper.swift every macOS call
+Sources/main.swift          entry point: daemon, worker, bridge, dashboard, viewer
+Sources/Worker/AX.swift     every macOS call
+Sources/Daemon/Server.swift the loopback HTTP surface
+Sources/Daemon/Session.swift the binding, ownership, identity-based rebind
+Sources/Daemon/Helper.swift the daemon's side of the worker protocol
+Sources/Daemon/Pool.swift   one worker process per bound app
+Sources/Daemon/Tools.swift  what each tool does, and what it may claim
+Sources/Daemon/MCP.swift    the MCP surface and the stdio bridge
+Sources/Daemon/Workspace.swift per-agent artefacts, the friction log, metrics
+Sources/Daemon/Dashboard.swift the dashboard (a viewer, not a requirement)
 skills/            the agent-facing skills
 plugin/            the DeepSeek Harness MCP bundle
 docs/              mechanics, verification, friction
@@ -155,7 +159,8 @@ docs/              mechanics, verification, friction
 
 ## Building
 
-Needs a Rust toolchain and the macOS Swift toolchain.
+Needs macOS and its Swift toolchain (`swiftc`, in Xcode or the Command Line
+Tools). No other build system, no package manager, no dependencies.
 
 ```bash
 ./build.sh
@@ -165,13 +170,13 @@ Four suites, all runnable locally:
 
 | Suite | What it covers |
 |---|---|
-| `cargo test` | 61 unit tests: parsing, window selection, ownership, focus flags, metrics |
+| `.build/selftest` | 46 checks: window rules, paths, focus honesty, metrics, surface agreement |
 | `scripts/acceptance.sh` | 27 checks against a real app: bind, drive, focus guard, lifecycle, MCP |
 | `scripts/tool_audit.py` | all 31 tools, asserting an observable effect where one is possible |
 | `perf/harness.py` | latency, memory, CPU, and the two invariants that must never break |
 
-That compiles the Swift helper, builds and tests the Rust driver, and
-refreshes `Quiet Driver.app` with the helper inside `Contents/Resources/`.
+That compiles the self-tests, builds the single binary, and refreshes
+`Quiet Driver.app`. The whole app is 792 KB.
 
 ## Licence
 

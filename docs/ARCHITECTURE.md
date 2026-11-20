@@ -42,9 +42,8 @@ worker per bind.
           v                                v
    +------------------+          (nothing is disturbed)
    | Quiet Driver     |
-   |  rust: control   |---- AX / CGEventPostToPid ---> [bound app]
-   |       link       |
-   |  swift: macOS    |
+   |   swift: all     |---- AX / CGEventPostToPid ---> [bound app]
+   |   of it          |---- one worker process per app
    +------------------+
           |
           v
@@ -60,8 +59,8 @@ Two processes, one session:
   forwards JSON-RPC. Both surfaces see the same session, so there is one
   owner of an app, not two.
 
-The macOS layer is Swift. Rust talks to it over a JSON-lines pipe. That split
-was not aesthetic: a Rust FFI implementation of the Accessibility API crashed
+The macOS layer is Swift. Swift talks to it over a JSON-lines pipe. That split
+was not aesthetic: a Swift FFI implementation of the Accessibility API crashed
 on `kAX*` symbol linkage and took hours to get right, while the Swift version
 works in a few hundred lines and is the reference implementation for exactly
 this API.
@@ -89,7 +88,7 @@ guarantee, and it is checkable: sample the pointer and the frontmost app at
 
 A binding is more than a pid.
 
-```rust
+```swift
 struct Target {
     pid: i32,
     identity: String,   // bundle id — survives a relaunch
@@ -146,6 +145,36 @@ A worker is a child process. If it dies, the main process notices on the next
 call and spawns a fresh one; the binding, the lock and the session state are
 untouched. That is the reason the split is worth having: a wedged accessibility
 connection to one app cannot take down the daemon that other agents are using.
+
+## One language, one binary
+
+The first version split the work between Rust (the control link, MCP, the
+dashboard) and Swift (every macOS call), joined by a JSON-lines pipe. It worked,
+but it cost a second toolchain, a 12 MB binary, a cross-language protocol to
+keep in sync, and a 30-second rebuild for every change to a tool description.
+
+It is now one Swift executable with five modes:
+
+| Mode | What it is |
+|---|---|
+| (default) or `--show` | the daemon plus its dashboard window |
+| `--headless` | the daemon alone |
+| `--worker` | one worker process, driven by the daemon over JSON lines |
+| `--viewer` | a dashboard window that attaches to a running daemon over HTTP |
+| `--mcp-stdio` | the MCP stdio bridge |
+
+The binary is 792 KB, builds in about two seconds, and the external contract did
+not move: the same HTTP endpoints, the same MCP tools, the same reply shapes.
+That is what let the existing acceptance sweep, tool audit and performance
+harness run against the new implementation unchanged and pass.
+
+The worker is still a separate process. That was never about the language: it
+isolates one app's accessibility connection from the others and from the daemon,
+so a wedged call against one app cannot take the driver down.
+
+A dashboard is now a *viewer*: it reads `/status` and posts actions over HTTP,
+so any number of windows can watch the same daemon without competing for the
+lock. The daemon itself may be headless forever.
 
 ## The dashboard is a viewer
 

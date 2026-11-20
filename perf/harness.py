@@ -150,7 +150,16 @@ class Monitor:
             self.proc.terminate()
             self.proc.wait(timeout=5)
 
-    def transitions(self) -> tuple[int, int, list[dict]]:
+    def transitions(self, target_app: str = "") -> tuple[int, int, list[dict]]:
+        """Count the transitions that are actually the driver's fault.
+
+        Two things can change while it works: which application is frontmost
+        (`front`), and which window is on top of the stack (`top`). An app
+        activating itself — or any other window redrawing — is not the driver.
+        What must never happen is the frontmost app changing, or the *bound
+        app's* window climbing to the top of the stack, because that is exactly
+        what raising the target looks like.
+        """
         rows = []
         with open(self.path) as fh:
             for line in fh:
@@ -160,7 +169,22 @@ class Monitor:
                         rows.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-        focus_moves = max(0, len(rows) - 1)
+        focus_moves = 0
+        prev = None
+        for row in rows:
+            if prev is None:
+                prev = row
+                continue
+            front_changed = row["front"] != prev["front"]
+            # The driver raising its own target: top becomes the bound app.
+            raised_target = (
+                bool(target_app)
+                and row["top"] == target_app
+                and prev["top"] != target_app
+            )
+            if front_changed or raised_target:
+                focus_moves += 1
+            prev = row
         pointer_moves = rows[-1]["pointerMoves"] if rows else 0
         return focus_moves, pointer_moves, rows
 
@@ -244,20 +268,23 @@ def run_suite(quick: bool) -> dict:
 
 
 def bench_text_tools(n: int, n_heavy: int) -> dict:
-    """Type and set text in a real text field, using TextEdit."""
+    """Type and set text in a real text field, using TextEdit.
+
+    Bind first, then open the document: open_file acts on whatever is bound, so
+    opening first sends the file to the previous app — and then the text tools
+    are measured against an app that never received a document.
+    """
+    os.makedirs("/tmp/quiet-driver-perf", exist_ok=True)
+    with open("/tmp/quiet-driver-perf/doc.txt", "w") as fh:
+        fh.write("performance harness\n")
+
     post("launch_app", app="TextEdit")
     time.sleep(1)
-    opened = post("open_file", path="/tmp/quiet-driver-perf/doc.txt")
-    if not opened.get("ok"):
-        # Make sure the file exists, then open it.
-        os.makedirs("/tmp/quiet-driver-perf", exist_ok=True)
-        with open("/tmp/quiet-driver-perf/doc.txt", "w") as fh:
-            fh.write("performance harness\n")
-        post("bind_app", app="TextEdit", agent="perf", takeover=True)
-        post("open_file", path="/tmp/quiet-driver-perf/doc.txt")
     bind = post("bind_app", app="TextEdit", agent="perf", takeover=True)
     if not bind.get("ok"):
         return {"benchmarks": [], "skipped": bind.get("error")}
+    post("open_file", path="/tmp/quiet-driver-perf/doc.txt")
+    time.sleep(1)
     out = [
         bench("type_text", lambda: post("type_text", text="x"), n),
         bench("set_value", lambda: post("set_value", text="harness"), n),
@@ -284,12 +311,13 @@ def measure_footprint(action_count: int) -> dict:
         "daemon_cpu_s": ps_cpu_seconds(pid),
         "workers": {c: ps_rss_mb(c) for c in child_pids(pid)},
     }
+    target_app = (get("/status").get("target") or {}).get("app", "")
     t0 = time.time()
     with Monitor("/tmp/quiet-driver-perf") as mon:
         for i in range(action_count):
             post("click_label", label=str(i % 10))
         time.sleep(0.4)
-        focus_moves, pointer_moves, rows = mon.transitions()
+        focus_moves, pointer_moves, rows = mon.transitions(target_app)
     elapsed = time.time() - t0
 
     after = {

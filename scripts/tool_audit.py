@@ -67,6 +67,17 @@ def skip(name: str, why: str) -> None:
     print(f"  {name:<42} SKIP  {why[:60]}")
 
 
+def calc_reset() -> None:
+    """Put the calculator back to a clean display.
+
+    Calculator distinguishes Clear (clears the entry) from All Clear (resets the
+    display). Using the wrong one leaves the previous test's value in place, and
+    the next assertion then measures that instead of the action under test.
+    """
+    if not post("click_label", label="All Clear")["ok"]:
+        post("click_label", label="Clear")
+
+
 def calculator_display() -> str:
     nodes = get("/tree")["nodes"]
     for n in nodes:
@@ -111,7 +122,7 @@ def main() -> int:
           f"{len((tree.get('data') or {}).get('nodes', []))} nodes")
 
     # --- pressing: assert the calculator actually changed
-    post("click_label", label="Clear")
+    calc_reset()
     before = calculator_display()
     r = post("click_label", label="7")
     time.sleep(0.2)
@@ -127,7 +138,7 @@ def main() -> int:
         fr = seven["frame"]
         lx = fr["x"] - bounds["x"] + fr["w"] / 2
         ly = fr["y"] - bounds["y"] + fr["h"] / 2
-        post("click_label", label="Clear")
+        calc_reset()
         before = calculator_display()
         r = post("click", x=lx, y=ly)
         time.sleep(0.2)
@@ -146,7 +157,7 @@ def main() -> int:
     check("out-of-window point refused", not r["ok"])
 
     # --- keyboard, against the calculator
-    post("click_label", label="Clear")
+    calc_reset()
     before = calculator_display()
     r = post("press_key", text="1")
     time.sleep(0.2)
