@@ -279,7 +279,7 @@ there would describe the lock and not the driver.
 unlocked. A run against a locked screen is not comparable and the harness
 rejects it.
 
-## 12. What is *not* verified
+## 15. What is *not* verified
 
 Honesty about the edges:
 
@@ -300,7 +300,25 @@ Honesty about the edges:
 
 ---
 
-## 13. Every tool, checked for effect
+## 13. Latency, after the second pass
+
+Measured through the daemon against a real Calculator window (p50):
+
+| Tool | Before | After | Why it was slow |
+|---|---|---|---|
+| `click_label` | 81 ms | **2.5 ms** | re-walked the whole tree per press; now one cached IPC call |
+| `get_text` | 1350 ms | **0.5 ms** | walked the tree to find the text area; now one focused-element read |
+| `set_value` | 1339 ms | **0.9 ms** | same |
+| `type_text` | 1391 ms | **8.3 ms** | same |
+| `accessibility_tree` | 950 ms | **13 ms** | five IPC calls per node; now one batched read |
+| `screenshot` | 137 ms | **70 ms** | `Process.waitUntilExit()` polls without a run loop; now `posix_spawn` |
+| `click (coordinate)` | 137 ms | **45 ms** | tree walk for the hit test |
+| `press_key` | 16 ms | **15.6 ms** | already bound by the app's own handling |
+
+300 actions run at ~124/s, the daemon stays at 10.3 MB with zero growth, and
+workers are 13-14 MB each.
+
+## 14. Every tool, checked for effect
 
 A tool that returns `ok` but does nothing is the failure mode this project was
 bitten by in its first build, so `scripts/tool_audit.py` drives all 31 tools and
