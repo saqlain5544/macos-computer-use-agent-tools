@@ -80,7 +80,10 @@ final class OpLog {
         // file stays valid, so without this a cleanup would silently swallow the
         // rest of the session's records.
         writesSinceCheck += 1
-        let needsCheck = writesSinceCheck >= 64
+        // Stat every 16 writes: one stat per 16 records is nothing, and it means
+        // a deleted log comes back within a second of activity rather than after
+        // a long gap with the records quietly going nowhere.
+        let needsCheck = writesSinceCheck >= 16
         if needsCheck { writesSinceCheck = 0 }
         let missing = needsCheck && !FileManager.default.fileExists(atPath: path(for: day))
         if handle == nil || day != currentDay || missing {
@@ -171,9 +174,17 @@ final class OpLog {
         var focusEvents = 0
         var pointerMoves = 0
         var totalMs = 0.0
+        var events: [String: Int] = [:]
 
         for row in rows {
-            let tool = (row["tool"] as? String) ?? (row["kind"] as? String) ?? "?"
+            // Lifecycle records (worker start, screen lock, mode change) are not
+            // operations: counting them as tools made "worker_start" show up in
+            // the latency table with a 0 ms p99.
+            guard (row["kind"] as? String) == "op" else {
+                events[(row["kind"] as? String) ?? "event", default: 0] += 1
+                continue
+            }
+            let tool = (row["tool"] as? String) ?? "?"
             let ms = (row["duration_ms"] as? Double) ?? 0
             byTool[tool, default: []].append(ms)
             totalMs += ms
@@ -210,6 +221,7 @@ final class OpLog {
             "slowest": Array(slowest),
             "failures": failures,
             "agents": byAgent,
+            "events": events,
             "focus_events": focusEvents,
             "pointer_moves": pointerMoves,
             "total_seconds": round2(totalMs / 1000),

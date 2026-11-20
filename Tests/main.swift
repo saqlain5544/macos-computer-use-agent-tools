@@ -145,6 +145,41 @@ check("every tool is routed to a handler",
       Tools.routedNames.count == Tools.names.count,
       "missing: \(Tools.names.filter { !Tools.routedNames.contains($0) })")
 
+// MARK: the operation log
+
+do {
+    let dir = "/tmp/quiet-driver-selftest-log"
+    try? FileManager.default.removeItem(atPath: dir)
+    let log = OpLog(directory: dir, enabled: true)
+    log.write(["kind": "op", "tool": "click", "agent": "a", "ok": true, "duration_ms": 12.0])
+    log.write(["kind": "op", "tool": "type", "agent": "b", "ok": false, "duration_ms": 30.0,
+               "error": "no text field"])
+    log.write(["kind": "worker_start", "identity": "com.apple.Calculator"])
+    log.close()
+
+    let rows = log.read(limit: 10)
+    check("the log writes one record per call", rows.count == 3, "\(rows.count)")
+    check("records carry a timestamp", (rows.first?["ts"] as? String)?.contains("T") == true)
+    check("the log filters by tool", log.read(limit: 10, tool: "click").count == 1)
+    check("the log filters by agent", log.read(limit: 10, agent: "b").count == 1)
+    check("the log filters failures", log.read(limit: 10, onlyFailures: true).count == 1)
+
+    let summary = log.summary(sinceSeconds: 3600)
+    check("the summary counts records", (summary["records"] as? Int) == 3)
+    let tools = summary["tools"] as? [String: Any] ?? [:]
+    check("the summary is per tool", tools.count == 2, "\(tools.keys)")
+    if let click = tools["click"] as? [String: Any] {
+        check("the summary has percentiles", (click["p50_ms"] as? Double) == 12.0)
+    }
+
+    // A disabled log must not create a directory or a file.
+    let quiet = OpLog(directory: "\(dir)-disabled", enabled: false)
+    quiet.write(["kind": "op", "tool": "click"])
+    check("a disabled log writes nothing",
+          !FileManager.default.fileExists(atPath: "\(dir)-disabled"))
+    try? FileManager.default.removeItem(atPath: dir)
+}
+
 // MARK: surfaces agree
 
 var seen = Set<String>()

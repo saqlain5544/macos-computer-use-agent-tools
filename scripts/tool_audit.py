@@ -246,7 +246,8 @@ def main() -> int:
         r = post("screenshot", agent="audit")
         err = (r.get("error") or "")
         check("a capture after closing everything is honest",
-              r["ok"] or ("no document window" in err) or ("not running" in err),
+              r["ok"] or any(phrase in err for phrase in
+                             ("no document window", "not running", "could not be captured")),
               (err or (r.get("data") or {}).get("window") or "")[:60])
 
     # --- lifecycle

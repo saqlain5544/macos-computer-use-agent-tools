@@ -316,6 +316,17 @@ enum Tools {
                 captured = fresh.windowId
                 attempt = Result { try helper.screenshot(windowId: captured, path: path) }
             }
+            if case .failure(let why) = attempt {
+                // Every retry failed. Say what that means for the caller rather
+                // than repeating the capture tool's error, which reads like a
+                // driver bug.
+                let hasWindow = helper.windowsList().contains {
+                    $0.pid == t.pid && Session.isUsableWindow($0)
+                }
+                return ActionReport.err(hasWindow
+                    ? "\(t.label) could not be captured (\(why)); its window may be closing — bind again or open a document"
+                    : noWindowReason(helper, t, "\(why)"))
+            }
             switch attempt {
             case .success(let shot):
                 var r = ActionReport.ok("captured \(shot.w)x\(shot.h) of \(t.label) (\(shot.bytes) bytes) to \(path)")

@@ -139,7 +139,7 @@ def main() -> int:
     print(f"  total operation time   {fmt(grand)}")
     print(f"  waiting on the app     {fmt(sum(worker))}  ({sum(worker) / grand * 100:.0f}%)")
     print(f"  driver overhead        {fmt(sum(driver))}  ({sum(driver) / grand * 100:.0f}%)")
-    print(f"  moving focus           {fmt(sum(focus))}  ({sum(focus) / grand * 100:.0f}%)")
+    print(f"  moving focus           {fmt(sum(focus))}  ({sum(focus) / grand * 100:.0f}%)  (inside worker time)")
 
     section("Guarantees")
     focus_changed = sum(1 for r in ops if (r.get("focus") or {}).get("changed") is True)

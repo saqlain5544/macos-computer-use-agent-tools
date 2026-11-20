@@ -391,9 +391,11 @@ final class Server {
         final.phases["total_ms"] = round2(micros / 1000.0)
         final.phases["worker_ms"] = round2(workerMicros / 1000.0)
         final.phases["worker_calls"] = Double(workerCalls)
-        let accounted = final.phases["worker_ms"]! + (final.phases["focus_raise_ms"] ?? 0)
-            + (final.phases["focus_restore_ms"] ?? 0)
-        final.phases["driver_ms"] = round2(max(0, final.phases["total_ms"]! - accounted))
+        // Focus raise and restore happen through worker calls, so they are part
+        // of worker_ms already; adding them again would make driver_ms zero and
+        // hide the driver's own cost. The focus numbers are a breakdown *within*
+        // the worker time, not on top of it.
+        final.phases["driver_ms"] = round2(max(0, final.phases["total_ms"]! - final.phases["worker_ms"]!))
         logOperation(tool: tool, args: obj, report: final, agent: agent,
                      workerDetail: workerDetail)
         shared.actionsTotal += 1
