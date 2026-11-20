@@ -161,6 +161,15 @@ Needs a Rust toolchain and the macOS Swift toolchain.
 ./build.sh
 ```
 
+Four suites, all runnable locally:
+
+| Suite | What it covers |
+|---|---|
+| `cargo test` | 61 unit tests: parsing, window selection, ownership, focus flags, metrics |
+| `scripts/acceptance.sh` | 27 checks against a real app: bind, drive, focus guard, lifecycle, MCP |
+| `scripts/tool_audit.py` | all 31 tools, asserting an observable effect where one is possible |
+| `perf/harness.py` | latency, memory, CPU, and the two invariants that must never break |
+
 That compiles the Swift helper, builds and tests the Rust driver, and
 refreshes `Quiet Driver.app` with the helper inside `Contents/Resources/`.
 

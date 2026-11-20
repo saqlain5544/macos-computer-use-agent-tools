@@ -300,14 +300,34 @@ Honesty about the edges:
 
 ---
 
+## 13. Every tool, checked for effect
+
+A tool that returns `ok` but does nothing is the failure mode this project was
+bitten by in its first build, so `scripts/tool_audit.py` drives all 31 tools and
+asserts an observable effect where one exists — the calculator display changes,
+the text field reads back what was written, the screenshot file is a real image.
+
+It found seven bugs, all fixed:
+
+| Bug | What it looked like |
+|---|---|
+| coordinate click did nothing | hit test returned a container, so the fallback synthetic event was ignored |
+| `set_caret` off by semantics | `location: 1` ("end") put the caret after one character |
+| `status` needed a binding | the first call an agent makes over MCP failed |
+| stale window after closing | capture tools reported the capture tool's error instead of "no window" |
+| captures on a ghost window | the window server lists a closed window for a moment |
+| untitled strips won a bind | an agent bound to a 1512x33 menu-bar strip |
+| focus flags lied | `restored: true` when focus was never moved |
+
+It now passes 48/48 repeatedly from any starting state.
+
 ## How to re-run these checks
 
 ```bash
-# the driver's own test suite
-cargo test
-
-# the acceptance sweep (binds, drives, checks the counters)
-./scripts/acceptance.sh
+cargo test                  # unit tests
+./scripts/acceptance.sh     # real app: bind, drive, focus guard, lifecycle
+./scripts/tool_audit.py     # every tool, asserting an effect
+./perf/harness.py           # latency, memory, invariants
 ```
 
 The sweep prints one PASS/FAIL line per behaviour and exits non-zero if any
