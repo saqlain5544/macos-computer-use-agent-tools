@@ -584,10 +584,16 @@ func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
         guard p.terminationStatus == 0, FileManager.default.fileExists(atPath: path) else {
             return ["ok": false, "error": "screencapture exited \(p.terminationStatus) for window \(wid)"]
         }
-        let bytes = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int) ?? 0
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let bytes = (attrs?[.size] as? Int) ?? 0
+        // Read the image's dimensions from its header. Decoding the whole PNG
+        // just to learn its size doubled the cost of a screenshot (65 ms of
+        // capture plus ~50 ms of decode for a 1348x816 window).
         var width = 0, height = 0
-        if let rep = NSBitmapImageRep(data: (try? Data(contentsOf: URL(fileURLWithPath: path))) ?? Data()) {
-            width = rep.pixelsWide; height = rep.pixelsHigh
+        if let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+            width = (props[kCGImagePropertyPixelWidth] as? Int) ?? 0
+            height = (props[kCGImagePropertyPixelHeight] as? Int) ?? 0
         }
         return ["ok": true, "path": path, "bytes": bytes, "width": width, "height": height]
     } catch {
@@ -1370,9 +1376,16 @@ func handle(_ req: [String: Any]) -> [String: Any] {
                 for k in kids { scan(k, depth + 1) }
             }
         }
-        if let mw = axAttr(ax, "AXMainWindow") { scan(mw as! AXUIElement, 0) }
-        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] {
-            for w in ws { scan(w, 0) }
+        var roots: [AXUIElement] = []
+        if let mw = axAttr(ax, "AXMainWindow") { roots.append(mw as! AXUIElement) }
+        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { roots.append(contentsOf: ws) }
+        for w in roots {
+            scan(w, 0)
+            // A modal sheet ("Save changes?" and friends) lives in AXSheets of
+            // the window it is attached to, not in the window's own children.
+            if let sheets = axAttr(w, "AXSheets") as? [AXUIElement] {
+                for sheet in sheets { scan(sheet, 0) }
+            }
         }
         if controls.isEmpty { scan(ax, 0) }
 
