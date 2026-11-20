@@ -187,8 +187,7 @@ pub fn bind(
             // the accessory/panel windows macOS hangs off other apps.
             candidates
                 .iter()
-                .filter(|w| !w.title.is_empty() && w.bounds.w >= 200.0 && w.bounds.h >= 150.0)
-                .filter(|w| !is_accessory(&w.title))
+                .filter(|w| !w.title.is_empty() && is_usable_window(w))
                 .max_by(|a, b| {
                     (a.bounds.w * a.bounds.h)
                         .partial_cmp(&(b.bounds.w * b.bounds.h))
@@ -197,13 +196,30 @@ pub fn bind(
                 .map(|w| (*w).clone())
         })
         .or_else(|| {
+            // Any non-accessory window, even untitled: better than a panel, and
+            // some apps do not title their main window.
             candidates
                 .iter()
-                .find(|w| !is_accessory(&w.title) && !w.title.is_empty())
+                .find(|w| is_usable_window(w))
                 .map(|w| (*w).clone())
         })
-        .or_else(|| candidates.first().map(|w| (*w).clone()))
-        .ok_or_else(|| format!("{} has no usable window", picked.owner))?;
+        // Never fall back to an accessory window. macOS hangs strips like
+        // "Save Panel Accessory View" off apps, and binding one gives an agent a
+        // 1428x128 rectangle that is not the app.
+        //
+        // Binding an app with no window at all is allowed: that is the normal
+        // state right after launch, and `open_file` is how a document gets
+        // opened. The binding records window 0 and the window-dependent tools
+        // explain the situation.
+        .unwrap_or_else(|| Window {
+            pid,
+            owner: picked.owner.clone(),
+            title: String::new(),
+            window_id: 0,
+            layer: 0,
+            on_screen: false,
+            bounds: Rect::default(),
+        });
 
     // Identity: prefer the bundle id so a relaunch can be re-bound by pid-less
     // matching; fall back to the app name.
@@ -251,6 +267,20 @@ pub fn bind(
 }
 
 /// Windows macOS hangs off an app that are not the app's own UI.
+/// Is this window one an agent can actually act in?
+///
+/// Filters two things macOS adds to every app's window list: the accessory
+/// panels it hangs off apps by title ("Save Panel Accessory View", "Open"), and
+/// the untitled full-width strips (1512x33) that are menu bar or status items
+/// but still report layer 0. Either one binds an agent to something that is not
+/// the app.
+fn is_usable_window(w: &Window) -> bool {
+    w.layer == 0
+        && !is_accessory(&w.title)
+        && w.bounds.w >= 120.0
+        && w.bounds.h >= 80.0
+}
+
 fn is_accessory(title: &str) -> bool {
     let t = title.to_ascii_lowercase();
     let exact = matches!(
@@ -302,13 +332,30 @@ pub fn rebind(h: &Helper, shared: &Handle) -> Result<Target, String> {
     let wins = helper::windows(h);
     let chosen = wins
         .iter()
-        .filter(|w| w.pid == pid && w.layer == 0 && w.window_id > 0)
+        .filter(|w| w.pid == pid && w.window_id > 0 && is_usable_window(w))
         .filter(|w| w.window_id == current.window_id)
         .next()
-        .or_else(|| wins.iter().find(|w| w.pid == pid && w.layer == 0 && !w.title.is_empty()))
-        .or_else(|| wins.iter().find(|w| w.pid == pid && w.layer == 0))
+        .or_else(|| {
+            wins.iter()
+                .filter(|w| w.pid == pid && is_usable_window(w))
+                .filter(|w| !w.title.is_empty())
+                .max_by(|a, b| {
+                    (a.bounds.w * a.bounds.h)
+                        .partial_cmp(&(b.bounds.w * b.bounds.h))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
+        .or_else(|| {
+            wins.iter()
+                .filter(|w| w.pid == pid && is_usable_window(w))
+                .max_by(|a, b| {
+                    (a.bounds.w * a.bounds.h)
+                        .partial_cmp(&(b.bounds.w * b.bounds.h))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
         .cloned()
-        .ok_or_else(|| format!("{} is running but has no window yet", name))?;
+        .ok_or_else(|| format!("{} has no document window", name))?;
     let updated = Target {
         pid,
         app_name: chosen.owner.clone(),
@@ -368,24 +415,30 @@ fn wait_for_frontmost(h: &Helper, pid: i32, budget_ms: u64) -> bool {
 /// and whether the person's app was put back.
 pub fn with_focus<T>(h: &Helper, target: &Target, f: impl FnOnce() -> T) -> (T, bool, bool) {
     let (before_pid, _) = helper::frontmost(h);
+
+    // If the target is already frontmost there is nothing to take and nothing
+    // to give back. Reporting `restored: true` in that case was a lie: the
+    // driver had not changed anything, so it had not restored anything either.
+    if before_pid == target.pid {
+        return (f(), false, false);
+    }
+
     let came_forward = helper::activate(h, target.pid).is_ok()
         || wait_for_frontmost(h, target.pid, 300);
     let _ = helper::raise_window(h, target.pid);
 
     let out = f();
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    let (after_pid, _) = helper::frontmost(h);
 
-    // Focus "changed" means the driver moved the person off their app: it did
-    // that if the target came forward and the target was not already front.
-    let changed = came_forward && before_pid != target.pid;
+    // `changed` is only true if the target really did come forward, which is
+    // what moved the person off their own app.
+    let changed = came_forward && before_pid != 0 && before_pid != target.pid;
 
-    let mut restored = true;
-    if before_pid != 0 && before_pid != target.pid {
+    // Put the person's app back, and verify it rather than assuming.
+    let mut restored = false;
+    if changed && before_pid != 0 {
         restored = helper::activate(h, before_pid).is_ok()
             || wait_for_frontmost(h, before_pid, 400);
     }
-    let _ = after_pid;
     (out, changed, restored)
 }
 
@@ -475,6 +528,32 @@ mod tests {
     }
 
     #[test]
+    fn untitled_strips_are_not_windows_to_act_in() {
+        // macOS adds 1512x33 layer-0 strips (menu bar, status items) to every
+        // app's window list. Binding one gives an agent a sliver.
+        let mut strip = win(9, "TextEdit", "", 3, 0);
+        strip.bounds = Rect { x: 0.0, y: 0.0, w: 1512.0, h: 33.0 };
+        assert!(!is_usable_window(&strip), "a 33px strip is not a window to act in");
+        assert!(!is_usable_window(&win(9, "TextEdit", "Open", 4, 0)));
+        assert!(is_usable_window(&win(9, "TextEdit", "notes.txt", 5, 0)));
+    }
+
+    #[test]
+    fn a_strip_never_wins_a_bind() {
+        // macOS hangs "Save Panel Accessory View" off apps; binding it gives an
+        // agent a 1428x128 rectangle that is not the app.
+        assert!(is_accessory("Save Panel Accessory View"));
+        assert!(is_accessory("Open"));
+        let ws = [
+            win(7, "TextEdit", "Save Panel Accessory View", 1, 0),
+            win(7, "TextEdit", "Open", 2, 0),
+        ];
+        let refs: Vec<&Window> = ws.iter().filter(|w| w.layer == 0).collect();
+        let picked = refs.iter().find(|w| !is_accessory(&w.title));
+        assert!(picked.is_none(), "no strip may be treated as a document window");
+    }
+
+    #[test]
     fn accessory_windows_are_not_chosen() {
         assert!(is_accessory("Save Panel Accessory View"));
         assert!(is_accessory("Open Panel"));
@@ -506,6 +585,20 @@ mod tests {
         // A dead pid plus an identity means "re-resolve me", not "give up".
         assert_eq!(t.pid, 0);
         assert!(t.identity.contains("calculator"));
+    }
+
+    #[test]
+    fn focus_flags_are_never_contradictory() {
+        // `restored` may only be true when `changed` is: a driver that says it
+        // gave focus back when it never took it is lying about the one thing
+        // this project promises.
+        fn consistent(changed: bool, restored: bool) -> bool {
+            !restored || changed
+        }
+        assert!(consistent(false, false));
+        assert!(consistent(true, true));
+        assert!(consistent(true, false), "coming forward without restoring is allowed, if reported");
+        assert!(!consistent(false, true), "restoring without changing is impossible");
     }
 
     #[test]

@@ -72,6 +72,49 @@ func matchControl(_ controls: [(AXUIElement, String)], _ label: String) -> (elem
     return nil
 }
 
+/// The control whose frame contains a screen point.
+///
+/// Coordinate clicks must resolve to something pressable. The system hit test
+/// can return a container group for a point that is visually over a button, and
+/// posting a synthetic event to a background app then does nothing at all. The
+/// control map already knows every control's frame, so the smallest frame
+/// containing the point is the element a person would have clicked.
+func controlAt(pid: Int32, x: Double, y: Double) -> AXUIElement? {
+    let point = CGPoint(x: x, y: y)
+    func fromCache() -> AXUIElement? {
+        guard let cached = controlCache[pid], Date().timeIntervalSince(cached.at) < controlCacheTTL else { return nil }
+        var best: (AXUIElement, CGFloat)?
+        for (i, frame) in cached.frames.enumerated() where frame.contains(point) {
+            if i < cached.controls.count {
+                let area = frame.width * frame.height
+                if best == nil || area < best!.1 { best = (cached.controls[i].0, area) }
+            }
+        }
+        return best?.0
+    }
+    if let hit = fromCache() { return hit }
+    // Cold: walk once, caching the same way press_label does.
+    let ax = appElement(pid)
+    let controlRoles = ["AXButton", "AXCheckBox", "AXPopUpButton", "AXMenuItem", "AXRadioButton"]
+    var controls: [(AXUIElement, String)] = []
+    func scan(_ el: AXUIElement, _ depth: Int) {
+        if depth > 30 || controls.count > 4000 { return }
+        let attrs = axMulti(el, ["AXRole", "AXDescription", "AXTitle", "AXValue", "AXChildren"])
+        let role = attrs["AXRole"] as? String ?? ""
+        if controlRoles.contains(role) {
+            let name = [attrs["AXDescription"], attrs["AXTitle"], attrs["AXValue"]]
+                .compactMap { $0 as? String }.first(where: { !$0.isEmpty }) ?? ""
+            controls.append((el, name))
+        }
+        if role == "AXMenuBar" || role == "AXMenuBarItem" || role == "AXMenu" { return }
+        if let kids = attrs["AXChildren"] as? [AXUIElement] { for k in kids { scan(k, depth + 1) } }
+    }
+    if let mw = axAttr(ax, "AXMainWindow") { scan(mw as! AXUIElement, 0) }
+    if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { for w in ws { scan(w, 0) } }
+    controlCache[pid] = (controls, controls.map { axFrame($0.0) }, Date())
+    return fromCache()
+}
+
 /// The app's editable text element.
 ///
 /// The focused element is the right answer and costs one call. Walking the tree
@@ -1047,7 +1090,9 @@ func handle(_ req: [String: Any]) -> [String: Any] {
             ($0.bundleIdentifier ?? "").caseInsensitiveCompare(app) == .orderedSame
                 || ($0.localizedName ?? "").caseInsensitiveCompare(app) == .orderedSame
         }) else {
-            return ["ok": false, "error": "\"\(app)\" is not running"]
+            // Quitting something that is already not running has achieved the
+            // goal, and an agent retrying a quit should not see a failure.
+            return ["ok": true, "already_gone": true, "name": app]
         }
         // NSRunningApplication.terminate() is the polite request; app sandbox
         // and "confirm on quit" dialogs can ignore it, so fall back to asking
@@ -1076,12 +1121,54 @@ func handle(_ req: [String: Any]) -> [String: Any] {
                 waited += 100
             }
         }
+        if target.isTerminated {
+            return ["ok": true, "requested": asked, "terminated": true,
+                    "waited_ms": waited, "name": target.localizedName ?? ""]
+        }
+        // Not terminated. The usual reason is a modal "save changes?" sheet:
+        // the app is waiting for an answer and will not quit until it gets one.
+        // Say that, rather than reporting a bare failure — the answer belongs to
+        // whoever owns the work, not to the driver.
+        let sheet = appElement(target.processIdentifier)
+        var sheetTitle = ""
+        if let mw = axAttr(sheet, "AXMainWindow") {
+            let w = mw as! AXUIElement
+            if let sheets = axAttr(w, "AXSheets") as? [AXUIElement], !sheets.isEmpty {
+                sheetTitle = axStr(sheets[0], "AXTitle")
+            }
+        }
+        let pid = target.processIdentifier
+        let docs = windowMenuDocuments(appElement(pid)) ?? []
+        if !sheetTitle.isEmpty || !docs.isEmpty {
+            return [
+                "ok": false,
+                "requested": asked,
+                "terminated": false,
+                "name": target.localizedName ?? "",
+                "error": sheetTitle.isEmpty
+                    ? "\(target.localizedName ?? "the app") has unsaved documents and did not quit; save or close them first"
+                    : "\(target.localizedName ?? "the app") is asking whether to save (\(sheetTitle)) and did not quit",
+                "sheets": sheetTitle.isEmpty ? [] : [sheetTitle],
+                "documents": docs,
+            ]
+        }
+        // No documents and no sheets, yet it is still running: there is no work
+        // to lose, so a forced terminate is safe and better than leaving a
+        // zombie the agent cannot get past.
+        _ = target.forceTerminate()
+        let hardDeadline = Date().addingTimeInterval(3.0)
+        while !target.isTerminated && Date() < hardDeadline { usleep(100_000) }
+        if target.isTerminated {
+            return ["ok": true, "requested": true, "terminated": true,
+                    "forced": true, "name": target.localizedName ?? ""]
+        }
         return [
-            "ok": target.isTerminated,
+            "ok": false,
             "requested": asked,
-            "terminated": target.isTerminated,
+            "terminated": false,
             "waited_ms": waited,
             "name": target.localizedName ?? "",
+            "error": "\(target.localizedName ?? "the app") did not quit within \(waited) ms",
         ]
 
     case "activate":
@@ -1169,6 +1256,16 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true, "nodes": rows]
 
     case "element_at":
+        if let control = controlAt(pid: Int32(pid), x: num("x"), y: num("y")) {
+            let f = axFrame(control)
+            return [
+                "ok": true, "role": axStr(control, "AXRole"),
+                "description": axStr(control, "AXDescription"),
+                "title": axStr(control, "AXTitle"),
+                "actions": axActions(control),
+                "x": f.origin.x, "y": f.origin.y, "w": f.size.width, "h": f.size.height,
+            ]
+        }
         guard let hit = hitTest(pid: Int32(pid), x: num("x"), y: num("y")) else {
             return ["ok": false, "error": "nothing at (\(num("x")), \(num("y")))"]
         }
@@ -1180,13 +1277,29 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         ]
 
     case "press_at":
-        guard let hit = hitTest(pid: Int32(pid), x: num("x"), y: num("y")) else {
-            return ["ok": false, "error": "nothing at (\(num("x")), \(num("y")))"]
+        let tx = num("x"), ty = num("y")
+        // The control whose frame contains the point, if there is one: that is
+        // what a person would have clicked, and it is pressable.
+        if let control = controlAt(pid: Int32(pid), x: tx, y: ty) {
+            let f = axFrame(control)
+            let rc = AXUIElementPerformAction(control, kAXPressAction as CFString).rawValue
+            if rc == 0 {
+                return [
+                    "ok": true, "rc": 0, "via": "control",
+                    "role": axStr(control, "AXRole"),
+                    "description": axStr(control, "AXDescription"),
+                    "title": axStr(control, "AXTitle"),
+                    "x": f.origin.x, "y": f.origin.y, "w": f.size.width, "h": f.size.height,
+                ]
+            }
+        }
+        guard let hit = hitTest(pid: Int32(pid), x: tx, y: ty) else {
+            return ["ok": false, "error": "nothing at (\(tx), \(ty))"]
         }
         let f = axFrame(hit.element)
         let rc = AXUIElementPerformAction(hit.element, kAXPressAction as CFString).rawValue
         return [
-            "ok": rc == 0, "rc": Int(rc),
+            "ok": rc == 0, "rc": Int(rc), "via": "hit test",
             "role": hit.role, "description": hit.description, "title": hit.title,
             "x": f.origin.x, "y": f.origin.y, "w": f.size.width, "h": f.size.height,
         ]
@@ -1276,20 +1389,18 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": rc == 0, "rc": Int(rc)]
 
     case "set_caret":
-        let ax = appElement(pid)
-        let loc = req["location"] as? Int ?? 0
-        let len = req["length"] as? Int ?? 0
-        for el in walk(ax) {
-            let role = axStr(el, "AXRole")
-            if role == "AXTextArea" || role == "AXTextField" {
-                var r = CFRange(location: loc, length: len)
-                guard let av = AXValueCreate(.cfRange, &r) else { return ["ok": false, "error": "bad range"] }
-                let rc = AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, av).rawValue
-                r = CFRange(location: 0, length: 0)
-                return ["ok": rc == 0, "rc": Int(rc)]
-            }
-        }
-        return ["ok": false, "error": "no text field"]
+        // location 0 = start, 1 = end, anything else is an absolute offset.
+        // length 0 = no selection, -1 or 1 = to the end.
+        let rawLoc = req["location"] as? Int ?? 0
+        let rawLen = req["length"] as? Int ?? 0
+        guard let el = textElement(appElement(pid)) else { return ["ok": false, "error": "no text field"] }
+        let length = (axAttr(el, "AXNumberOfCharacters") as? Int) ?? (axStr(el, "AXValue").count)
+        let loc = rawLoc == 1 ? length : rawLoc
+        let len = rawLen < 0 ? max(0, length - loc) : rawLen
+        var r = CFRange(location: loc, length: len)
+        guard let av = AXValueCreate(.cfRange, &r) else { return ["ok": false, "error": "bad range"] }
+        let rc = AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, av).rawValue
+        return ["ok": rc == 0, "rc": Int(rc), "location": loc, "length": len]
 
     case "click", "double_click", "right_click", "move":
         let p = CGPoint(x: num("x"), y: num("y"))

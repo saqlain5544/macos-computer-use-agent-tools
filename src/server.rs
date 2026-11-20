@@ -638,6 +638,85 @@ pub fn execute_public(
 /// The worker for whatever is currently bound, or the session worker when
 /// nothing is. Called once per request, so a rebind between actions is picked
 /// up without any extra bookkeeping.
+/// The bound target, refreshed and verified live.
+///
+/// Every tool that acts on the app must go through here. Two had grown their own
+/// `current_target` lookup and skipped the check, so after the last document was
+/// closed they kept acting on a dead window id — a screenshot tried to capture a
+/// window that no longer existed and reported the capture tool's error instead
+/// of the real problem.
+fn live_target(
+    shared: &Handle,
+    helper: &Helper,
+    force_refresh: bool,
+) -> Result<session::Target, ActionReport> {
+    let mut target = session::current_target(shared).map_err(ActionReport::err)?;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let due = {
+        let s = shared.lock().unwrap();
+        force_refresh || now_ms.saturating_sub(s.bounds_refreshed_at) >= BOUNDS_REFRESH_MS
+    };
+    if target.pid != 0 && !due {
+        return Ok(target);
+    }
+
+    match session::refresh_bounds(helper, &target) {
+        Some(w) => {
+            target.bounds = w.bounds;
+            let mut s = shared.lock().unwrap();
+            s.bounds_refreshed_at = now_ms;
+            if let Some(t) = s.target.as_mut() {
+                t.bounds = target.bounds;
+            }
+            Ok(target)
+        }
+        None => match session::rebind(helper, shared) {
+            Ok(t) => Ok(t),
+            Err(e) => {
+                let app_running = helper::resolve(helper, &target.identity)
+                    .or_else(|_| helper::resolve(helper, &target.app_name))
+                    .is_ok();
+                Err(ActionReport::err(if app_running {
+                    format!(
+                        "{} is running but has no window to act on ({}); open a document with open_file, or bind a different window",
+                        target.app_name, e
+                    )
+                } else {
+                    format!(
+                        "{} is not running ({}); relaunch it and the next action will re-bind automatically",
+                        target.app_name, e
+                    )
+                }))
+            }
+        },
+    }
+}
+
+/// Does a close operation free the window the binding points at?
+fn closed_name_matches(t: &session::Target, closing: &str) -> bool {
+    t.window_id != 0
+        && (closing.is_empty() || t.window_title == closing || t.window_title.is_empty())
+}
+
+/// The sentence an agent should see when the app is up but has no window.
+fn no_window_reason(helper: &Helper, t: &session::Target, cause: String) -> String {
+    let app_running = helper::resolve(helper, &t.identity)
+        .or_else(|_| helper::resolve(helper, &t.app_name))
+        .is_ok();
+    if app_running {
+        format!(
+            "{} is running but has no document window ({}); open one with open_file, or bind a different window",
+            t.app_name, cause
+        )
+    } else {
+        format!("{} is not running ({}); relaunch it and the next action will re-bind", t.app_name, cause)
+    }
+}
+
 fn bound_helper(shared: &Handle, pool: &WorkerPool) -> Arc<Helper> {
     match shared.lock().unwrap().target.as_ref() {
         Some(t) if !t.identity.is_empty() => pool.for_app(&t.identity),
@@ -662,6 +741,38 @@ fn run_tool(
     }
 
     match tool {
+        "status" => {
+            // Reading state never needs a binding: an agent asks for status
+            // before it has bound anything, and over MCP the very first call is
+            // often this one.
+            let s = shared.lock().unwrap();
+            let target = s.target.as_ref().map(target_json);
+            let mut r = ActionReport::ok(format!(
+                "{} · mode {} · {} actions",
+                target
+                    .as_ref()
+                    .and_then(|t| t["label"].as_str())
+                    .unwrap_or("nothing bound"),
+                s.mode.as_str(),
+                s.actions_total
+            ));
+            r.payload = Some(json!({
+                "driver": s.running,
+                "mode": s.mode.as_str(),
+                "target": target,
+                "frontmost": s.frontmost,
+                "focus_events": s.focus_events,
+                "actions_total": s.actions_total,
+                "agents": s.agents,
+                "screen_locked": s.screen_locked,
+                "permissions": {
+                    "accessibility": s.permissions.accessibility,
+                    "post_events": s.permissions.post_events,
+                    "screen_capture": s.permissions.screen_capture,
+                },
+            }));
+            return r;
+        }
         "show_dashboard" => {
             if let Some(flag) = shared.lock().unwrap().show_window.take() {
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -714,6 +825,14 @@ fn run_tool(
             let previous_identity = shared.lock().unwrap().target.as_ref().map(|t| t.identity.clone());
             return match session::bind(helper, shared, &selector, window, &owner, takeover) {
                 Ok(t) => {
+                    let label = if t.window_id == 0 {
+                        format!(
+                            "bound to {} as \"{}\" (no window yet — use open_file to open a document)",
+                            t.app_name, t.owner
+                        )
+                    } else {
+                        format!("bound to {} as \"{}\"", t.label(), t.owner)
+                    };
                     // Give the app its worker now: the first action on it should
                     // not pay for a process spawn. If the binding moved to a
                     // different app, reap the old one so a session that hops
@@ -724,7 +843,7 @@ fn run_tool(
                         }
                     }
                     let _ = pool.for_app(&t.identity);
-                    let mut r = ActionReport::ok(format!("bound to {} as \"{}\"", t.label(), t.owner));
+                    let mut r = ActionReport::ok(label);
                     r.payload = Some(target_json(&t));
                     r
                 }
@@ -829,9 +948,9 @@ fn run_tool(
             return r;
         }
         "screenshot" => {
-            let t = match session::current_target(shared) {
+            let t = match live_target(shared, helper, true) {
                 Ok(t) => t,
-                Err(e) => return ActionReport::err(e),
+                Err(r) => return r,
             };
             let agent = agent_id(obj);
             let path = match workspace::resolve_output(
@@ -841,7 +960,15 @@ fn run_tool(
                 Err(e) => return ActionReport::err(e),
             };
             let path_str = path.to_string_lossy().into_owned();
-            return match helper::screenshot(helper, t.window_id, &path_str) {
+            let mut attempt = helper::screenshot(helper, t.window_id, &path_str);
+            if attempt.is_err() {
+                // The window may be listed but already dead. Re-resolve once.
+                match session::rebind(helper, shared) {
+                    Ok(fresh) => attempt = helper::screenshot(helper, fresh.window_id, &path_str),
+                    Err(e) => return ActionReport::err(no_window_reason(helper, &t, e)),
+                }
+            }
+            return match attempt {
                 Ok((w, h, bytes)) => {
                     let mut r = ActionReport::ok(format!(
                         "captured {}x{} of {} ({} bytes) to {}", w, h, t.label(), bytes, path.display()
@@ -856,9 +983,9 @@ fn run_tool(
             };
         }
         "record" => {
-            let t = match session::current_target(shared) {
+            let t = match live_target(shared, helper, true) {
                 Ok(t) => t,
-                Err(e) => return ActionReport::err(e),
+                Err(r) => return r,
             };
             let agent = agent_id(obj);
             let path = match workspace::resolve_output(
@@ -869,7 +996,14 @@ fn run_tool(
             };
             let seconds = num(obj, "seconds").unwrap_or(3.0).clamp(0.5, 60.0);
             let path_str = path.to_string_lossy().into_owned();
-            return match helper::record(helper, t.pid, seconds, &path_str) {
+            let mut attempt = helper::record(helper, t.pid, seconds, &path_str);
+            if attempt.is_err() {
+                if let Err(e) = session::rebind(helper, shared) {
+                    return ActionReport::err(no_window_reason(helper, &t, e));
+                }
+                attempt = helper::record(helper, t.pid, seconds, &path_str);
+            }
+            return match attempt {
                 Ok((w, h, frames, bytes)) => {
                     let mut r = ActionReport::ok(format!(
                         "recorded {} frames of {} ({}x{}) to {}",
@@ -909,9 +1043,9 @@ fn run_tool(
             };
         }
         "close_file" => {
-            let t = match session::current_target(shared) {
+            let t = match live_target(shared, helper, true) {
                 Ok(t) => t,
-                Err(e) => return ActionReport::err(e),
+                Err(r) => return r,
             };
             let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let target = if name.trim().is_empty() {
@@ -922,8 +1056,21 @@ fn run_tool(
             if target.trim().is_empty() {
                 return ActionReport::err("no document to close");
             }
+            let closed_was_bound = closed_name_matches(&t, &target);
             return match helper::close_file(helper, t.pid, &target) {
                 Ok(closed) => {
+                    if closed_was_bound {
+                        // The bound window is gone; make the binding say so. The
+                        // window server keeps listing a closed window for a
+                        // moment, so leaving the id would make the next action
+                        // act on a ghost.
+                        if let Some(cur) = shared.lock().unwrap().target.as_mut() {
+                            cur.window_id = 0;
+                            cur.window_title.clear();
+                            cur.bounds = helper::Rect::default();
+                        }
+                        shared.lock().unwrap().bounds_refreshed_at = 0;
+                    }
                     let mut r = ActionReport::ok(format!("closed {}", closed));
                     r.payload = Some(json!({"closed": closed}));
                     r
@@ -932,9 +1079,9 @@ fn run_tool(
             };
         }
         "documents" => {
-            let t = match session::current_target(shared) {
+            let t = match live_target(shared, helper, true) {
                 Ok(t) => t,
-                Err(e) => return ActionReport::err(e),
+                Err(r) => return r,
             };
             let docs = helper::documents(helper, t.pid);
             let mut r = ActionReport::ok(format!("{} open document(s)", docs.len()));
@@ -1025,51 +1172,10 @@ fn run_tool(
         _ => {}
     }
 
-    let mut target = match session::current_target(shared) {
+    let target = match live_target(shared, helper, false) {
         Ok(t) => t,
-        Err(e) => return ActionReport::err(e),
+        Err(r) => return r,
     };
-    // Keep the binding honest: the app may have been quit and relaunched, or
-    // the window may have moved. One window enumeration answers both questions.
-    //
-    // It is throttled: enumerating the window server costs ~40 ms, and doing it
-    // on every action would dominate the latency of an AX press. A quarter
-    // second is far below the rate at which a person moves a window, and a
-    // stale rectangle is corrected on the next action rather than acted on
-    // blindly forever.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let due = {
-        let s = shared.lock().unwrap();
-        now_ms.saturating_sub(s.bounds_refreshed_at) >= BOUNDS_REFRESH_MS
-    };
-    if target.pid == 0 || due {
-        match session::refresh_bounds(helper, &target) {
-            Some(w) => {
-                if w.bounds != target.bounds {
-                    target.bounds = w.bounds;
-                }
-                let mut s = shared.lock().unwrap();
-                s.bounds_refreshed_at = now_ms;
-                if let Some(t) = s.target.as_mut() {
-                    t.bounds = target.bounds;
-                    t.window_title = target.window_title.clone();
-                }
-            }
-            None => match session::rebind(helper, shared) {
-                Ok(t) => target = t,
-                Err(e) => {
-                    return ActionReport::err(format!(
-                        "{} was not running ({}); relaunch it and the next action will re-bind automatically",
-                        target.label(),
-                        e
-                    ))
-                }
-            },
-        }
-    }
 
     let in_window = |x: f64, y: f64| -> Result<(), String> {
         let local = helper::Rect { x: 0.0, y: 0.0, w: target.bounds.w, h: target.bounds.h };
@@ -1456,6 +1562,18 @@ mod tests {
         assert_eq!(shared.lock().unwrap().mode, Mode::Focused);
         let _ = action(r#"{"tool":"set_mode","mode":"background"}"#, &shared, &pool);
         assert_eq!(shared.lock().unwrap().mode, Mode::Background);
+    }
+
+    #[test]
+    fn status_works_without_a_binding() {
+        // An agent asks for status before it has bound anything, and over MCP
+        // that is usually the first call it makes.
+        let shared = test_shared();
+        let pool = WorkerPool::new(std::path::PathBuf::from("/nonexistent/helper.swift"));
+        let reply: Value = serde_json::from_str(&action(r#"{"tool":"status"}"#, &shared, &pool)).unwrap();
+        assert_eq!(reply["ok"], true, "status must not need a binding: {}", reply);
+        assert_eq!(reply["data"]["mode"], "background");
+        assert!(reply["data"]["target"].is_null());
     }
 
     #[test]

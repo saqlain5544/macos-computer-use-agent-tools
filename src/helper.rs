@@ -256,6 +256,10 @@ pub fn launch(h: &Helper, app: &str) -> Result<(i32, String), String> {
 }
 
 /// Quit an app by identity. Tries terminate, Apple Events, then SIGTERM.
+///
+/// Fails with the app's own reason when it does not quit — most often a modal
+/// "save changes?" sheet, which the driver must not answer on the person's
+/// behalf.
 pub fn quit_app(h: &Helper, app: &str) -> Result<String, String> {
     let v = h.ok(json!({"cmd": "quit_app", "app": app}))?;
     Ok(v.get("name").and_then(|x| x.as_str()).unwrap_or(app).to_string())
