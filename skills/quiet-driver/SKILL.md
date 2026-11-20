@@ -47,20 +47,27 @@ Each agent has a workspace, `/tmp/quiet-driver/agent-<id>/`, where these land.
 Pass `path` to save anywhere else. The MCP reply returns the image inline, so
 you can look at it directly.
 
-## Working with an app that has a file dialog
+## Opening and closing files
 
-Opening a file usually shows a panel that takes focus away from the person.
-Before you fight with it, try the cheaper routes:
+Do **not** open a file by clicking File → Open. That shows a modal panel that
+takes focus away from the person, and on macOS 15 the panel does not respond to
+accessibility actions — so it cannot be driven back to a clean state.
 
-1. **The app's own scripting** — `open -a TextEdit /path/to/file` opens a
-   document with no dialog at all.
-2. **AX directly** — the file list inside the panel is reachable through the
-   accessibility tree.
-3. **The dialog route** — the `file_dialog` tool inspects and drives an open or
-   save panel.
+Use the file tools instead. They work entirely in the background:
 
-If a dialog is genuinely unavoidable, say so rather than silently stealing
-focus. A `focused` action around it is honest and reversible.
+```
+open_file  { path: "/path/to/file" }     # opens it, no panel, no focus change
+documents  { }                            # what the app has open
+close_file { name: "file.txt" }           # closes that document, app keeps running
+```
+
+`open_file` is `open -g`: the document appears in the app and the person's
+frontmost app does not change. `close_file` presses the document window's own
+close button and verifies the document is gone before reporting success. If the
+document has unsaved changes it reports that it is asking, rather than guessing.
+
+If you ever do find a panel open, cancel it with the app — do not leave it
+there for the next agent.
 
 ## When two agents want the same app
 
@@ -132,6 +139,9 @@ Read the collected backlog with `friction_log`.
 | `set_caret` | `location?`, `length?` | `location` 0 = start, 1 = end |
 | `click_label` | `label` | exact, then case-insensitive, then unique word subset |
 | `get_text` | | the bound app's text field |
+| `open_file` | `path`, `app?` | open a document with no panel, no focus change |
+| `documents` | | the documents the app has open |
+| `close_file` | `name?` | close one document, leaving the app running |
 | `screenshot` | `path?`, `agent?` | PNG of the bound window |
 | `record` | `seconds?`, `path?`, `agent?` | .mov of the bound window |
 | `set_mode` | `mode` | `background` or `focused` |

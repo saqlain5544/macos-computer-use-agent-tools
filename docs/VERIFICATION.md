@@ -159,7 +159,33 @@ a build step.
 
 ---
 
-## 9. What is *not* verified
+## 9. Files open and close in the background
+
+**Method.** Bind TextEdit, open two documents, list them, close both, and
+check the person's frontmost app throughout.
+
+```
+open_file /tmp/a.txt   -> opened, focus_changed: false
+open_file /tmp/b.txt   -> opened, focus_changed: false
+documents              -> ["qd_e2e2.txt", "qd_e2e1.txt"]
+close_file a           -> closed qd_e2e1.txt
+documents              -> ["qd_e2e2.txt"]
+close_file b           -> closed qd_e2e2.txt
+documents              -> []
+frontmost              -> DeepSeek Harness, unchanged throughout
+TextEdit               -> still running
+```
+
+**Result.** A document opens with no file panel and no focus change, and a
+document closes without quitting the app. `close_file` verifies the document
+is gone before reporting success, and reports a save prompt rather than
+guessing.
+
+The first implementation of `close_file` reported success without closing
+anything — the acceptance sweep caught it because it checks the document list
+afterwards. That is why the sweep exists.
+
+## 10. What is *not* verified
 
 Honesty about the edges:
 
@@ -192,3 +218,5 @@ cargo test
 
 The sweep prints one PASS/FAIL line per behaviour and exits non-zero if any
 fails, so it can run in CI on a machine with the three permissions granted.
+It currently runs 27 checks, and passes three times in a row from any starting
+state.

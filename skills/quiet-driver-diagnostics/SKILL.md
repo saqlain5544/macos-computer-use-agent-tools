@@ -59,20 +59,26 @@ the background.
 focus. If it is not zero and you did not ask for focused mode, that is a bug —
 report it with `log_friction`.
 
-## A file dialog will not commit
+## A file dialog is open and will not commit
 
-Some `NSOpenPanel` / `NSSavePanel` dialogs do not respond to accessibility
-actions at all. Before fighting it:
+`NSOpenPanel` and `NSSavePanel` do not respond to accessibility actions on
+macOS 15 — the panel's buttons report success and nothing happens. **Do not
+loop on one.** If you opened a panel by clicking File → Open, you should not
+have: use `open_file` instead, which shows no panel at all.
 
-1. **Avoid the dialog.** `open -a App /path/to/file` opens a document with no
-   panel at all. `quit_app` + `launch_app` with a document argument does the
-   same for a rebuild cycle.
-2. **Read the panel.** `get_accessibility_tree` shows the panel's controls,
-   including the file rows.
-3. **Accept the cost.** If the panel must be committed, wrap it in a
-   `focused` action and tell the person you are about to borrow their screen.
+If a panel is open and you need it gone:
 
-Do not silently loop on a dialog that will not close.
+1. **Cancel it inside the app.** The panel belongs to the app; sending the
+   app cmd+period (`.` with command) dismisses it, as does its Cancel button
+   when the app is frontmost.
+2. **Check it is gone** with `get_accessibility_tree` or `documents`. A stale
+   panel window leaves the app reporting a phantom "Open" window, and the next
+   bind can land on it.
+3. **Never leave a panel open** for the next agent. It will look like a
+   document window and it cannot be driven.
+
+The right answer for "open this file" is `open_file`. The right answer for
+"this app needs a save dialog" is to say so to the person.
 
 ## The app is not where you think it is
 

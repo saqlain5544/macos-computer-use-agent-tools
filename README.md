@@ -89,6 +89,10 @@ dsh plugin install ./plugin/quiet-driver-mcp
   depending on what is on screen.
 - **Own the lifecycle** — `launch_app` (background, no focus change),
   `quit_app`, `rebind` after a rebuild-and-relaunch.
+- **Handle files without dialogs** — `open_file` opens a document with no
+  panel and no focus change, `documents` lists what is open, `close_file`
+  closes one and verifies it. This matters because a file panel steals focus
+  and, on macOS 15, does not respond to accessibility actions.
 - **Stay out of the way** — `background` mode by default, `focused` only on
   request, and the reply tells the agent whether it disturbed anything.
 - **Report problems** — `log_friction` and `friction_log`.

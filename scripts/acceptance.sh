@@ -38,9 +38,11 @@ echo
 
 # Start from a clean slate so the sweep can be run repeatedly.
 post '{"tool":"unbind"}' > /dev/null 2>&1
+post '{"tool":"launch_app","app":"Calculator"}' > /dev/null 2>&1
+sleep 1
 
 echo "binding and driving"
-post '{"tool":"bind_app","app":"Calculator","agent":"acceptance"}' > /tmp/qd_acc_bind.json
+post '{"tool":"bind_app","app":"Calculator","agent":"acceptance","takeover":true}' > /tmp/qd_acc_bind.json
 check "bind a background app" "$(jqp 'd["ok"]' < /tmp/qd_acc_bind.json)"
 post '{"tool":"click_label","label":"7"}' > /tmp/qd_acc_click.json
 check "press a control by label" "$(jqp 'd["ok"]' < /tmp/qd_acc_click.json)"
@@ -95,7 +97,27 @@ post '{"tool":"click_label","label":"5"}' > /tmp/qd_acc_rebind.json
 check "action works after the relaunch" "$(jqp 'd["ok"]' < /tmp/qd_acc_rebind.json)"
 
 echo
+echo "files, without a panel or a focus change"
+# Documents belong to an app that has them, so drive TextEdit for this part.
+post '{"tool":"unbind"}' > /dev/null
+post '{"tool":"launch_app","app":"TextEdit"}' > /dev/null
+sleep 1
+post '{"tool":"bind_app","app":"TextEdit","agent":"acceptance","takeover":true}' > /dev/null
+printf 'ACCEPTANCE DOC\n' > /tmp/qd_acc_doc.txt
+post '{"tool":"open_file","path":"/tmp/qd_acc_doc.txt"}' > /tmp/qd_acc_open.json
+check "open a document in the background" "$(jqp 'd["ok"]' < /tmp/qd_acc_open.json)"
+sleep 1
+post '{"tool":"documents"}' > /tmp/qd_acc_docs.json
+check "list the open documents" "$(jqp 'd["ok"]' < /tmp/qd_acc_docs.json)"
+check "the opened document is listed" "$(jqp 'any("qd_acc_doc" in x for x in d["data"]["documents"])' < /tmp/qd_acc_docs.json)"
+post '{"tool":"close_file","name":"qd_acc_doc.txt"}' > /tmp/qd_acc_close.json
+check "close the document" "$(jqp 'd["ok"]' < /tmp/qd_acc_close.json)"
+rm -f /tmp/qd_acc_doc.txt
+post '{"tool":"unbind"}' > /dev/null
+
+echo
 echo "focused mode, on request"
+post '{"tool":"bind_app","app":"Calculator","agent":"acceptance","takeover":true}' > /dev/null
 post '{"tool":"set_mode","mode":"focused"}' > /dev/null
 post '{"tool":"click_label","label":"6"}' > /tmp/qd_acc_focus.json
 check "focused action runs" "$(jqp 'd["ok"]' < /tmp/qd_acc_focus.json)"

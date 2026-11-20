@@ -355,6 +355,112 @@ func handleScreenshot(_ req: [String: Any]) -> [String: Any] {
 /// File dialogs are usually *sheets* (inside `AXSheets` of the parent window,
 /// not in `AXWindows`), and the filename field has no title or description, so
 /// both are found structurally rather than by label.
+/// The documents an app has open, read from its Window menu.
+func windowMenuDocuments(_ ax: AXUIElement) -> [String]? {
+    guard let bar = axAttr(ax, "AXMenuBar") else { return nil }
+    var windowItem: AXUIElement?
+    func findBar(_ e: AXUIElement, _ d: Int) {
+        if d > 4 || windowItem != nil { return }
+        if axStr(e, "AXRole") == "AXMenuBarItem" && axStr(e, "AXTitle") == "Window" { windowItem = e; return }
+        if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for c in kids { findBar(c, d + 1) } }
+    }
+    findBar(bar as! AXUIElement, 0)
+    guard let wi = windowItem else { return nil }
+
+    // A document's entry in the Window menu carries the selector
+    // "makeKeyAndOrderFront:"; the standard window-management items carry
+    // their own selectors. That identifier is the reliable discriminator.
+    var items: [AXUIElement] = []
+    func collect(_ e: AXUIElement, _ d: Int) {
+        if d > 6 { return }
+        if axStr(e, "AXRole") == "AXMenuItem" { items.append(e) }
+        if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for c in kids { collect(c, d + 1) } }
+    }
+    collect(wi, 0)
+    let titles: [String] = items
+        .filter { axStr($0, "AXIdentifier").contains("makeKeyAndOrderFront") }
+        .map { axStr($0, "AXTitle") }
+    return titles.filter { !$0.isEmpty }
+}
+
+/// Press a document's entry in the app's Window menu, making it the front
+/// document without activating the app.
+func pressWindowMenuItem(_ ax: AXUIElement, _ title: String) -> Bool {
+    guard let bar = axAttr(ax, "AXMenuBar") else { return false }
+    var windowItem: AXUIElement?
+    func findBar(_ e: AXUIElement, _ d: Int) {
+        if d > 4 || windowItem != nil { return }
+        if axStr(e, "AXRole") == "AXMenuBarItem" && axStr(e, "AXTitle") == "Window" { windowItem = e; return }
+        if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for c in kids { findBar(c, d + 1) } }
+    }
+    findBar(bar as! AXUIElement, 0)
+    guard let wi = windowItem else { return false }
+    var target: AXUIElement?
+    func collect(_ e: AXUIElement, _ d: Int) {
+        if d > 6 || target != nil { return }
+        if axStr(e, "AXRole") == "AXMenuItem",
+           axStr(e, "AXTitle") == title,
+           axStr(e, "AXIdentifier").contains("makeKeyAndOrderFront") {
+            target = e; return
+        }
+        if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for c in kids { collect(c, d + 1) } }
+    }
+    collect(wi, 0)
+    guard let t = target else { return false }
+    return AXUIElementPerformAction(t, "AXPress" as CFString).rawValue == 0
+}
+
+/// Close a document by making it the app's front document and sending
+/// cmd+w to the app's process. The event never reaches the screen and the
+/// app is never activated, so the person is not disturbed.
+func closeViaWindowMenu(_ ax: AXUIElement, _ name: String, pid: Int) -> String? {
+    guard !name.isEmpty else { return nil }
+    // The document's own menu item in the Window menu can be AXPressed, which
+    // makes it the front document without activating the app.
+    if let bar = axAttr(ax, "AXMenuBar") {
+        var windowItem: AXUIElement?
+        func findBar(_ e: AXUIElement, _ d: Int) {
+            if d > 4 || windowItem != nil { return }
+            if axStr(e, "AXRole") == "AXMenuBarItem" && axStr(e, "AXTitle") == "Window" { windowItem = e; return }
+            if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for c in kids { findBar(c, d + 1) } }
+        }
+        findBar(bar as! AXUIElement, 0)
+        if let wi = windowItem {
+            var target: AXUIElement?
+            func collect(_ e: AXUIElement, _ d: Int) {
+                if d > 6 || target != nil { return }
+                if axStr(e, "AXRole") == "AXMenuItem",
+                   axStr(e, "AXTitle") == name,
+                   axStr(e, "AXIdentifier").contains("makeKeyAndOrderFront") {
+                    target = e; return
+                }
+                if let kids = axAttr(e, "AXChildren") as? [AXUIElement] { for c in kids { collect(c, d + 1) } }
+            }
+            collect(wi, 0)
+            if let t = target {
+                _ = AXUIElementPerformAction(t, "AXPress" as CFString)
+                usleep(200_000)
+            }
+        }
+    }
+    // cmd+w to the app's process: closes its front document, in the background.
+    let src = CGEventSource(stateID: .hidSystemState)
+    let down = CGEvent(keyboardEventSource: src, virtualKey: 13, keyDown: true)!
+    down.flags = .maskCommand
+    down.postToPid(pid_t(pid))
+    let up = CGEvent(keyboardEventSource: src, virtualKey: 13, keyDown: false)!
+    up.flags = .maskCommand
+    up.postToPid(pid_t(pid))
+    usleep(500_000)
+
+    // Verify: the document must be gone from the Window menu. Reporting
+    // success without checking would be the one thing this driver must not do.
+    if let remaining = windowMenuDocuments(ax), !remaining.contains(name) {
+        return name
+    }
+    return nil
+}
+
 /// Pids of the AppKit open/save panel services (the dialog's real window owner).
 func panelServicePids() -> [pid_t] {
     NSWorkspace.shared.runningApplications
@@ -956,6 +1062,104 @@ func handle(_ req: [String: Any]) -> [String: Any] {
 
     case "record":
         return recordWindow(req)
+
+    case "open_file":
+        // Open a document without showing a file panel and without bringing
+        // the app forward. `open -g` is the whole trick.
+        let path = req["path"] as? String ?? ""
+        let app = req["app"] as? String ?? ""
+        guard !path.isEmpty else { return ["ok": false, "error": "open_file needs a path"] }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = app.isEmpty ? ["-g", path] : ["-g", "-a", app, path]
+        do {
+            try p.run(); p.waitUntilExit()
+            return ["ok": p.terminationStatus == 0, "exit": Int(p.terminationStatus),
+                    "path": path, "app": app]
+        } catch {
+            return ["ok": false, "error": "\(error)"]
+        }
+
+    case "close_file":
+        // Close one document without quitting the app.
+        //
+        // The reliable route is the window's own AXCloseButton: AXClose on the
+        // window returns success but does nothing, and cmd+w posted to the pid
+        // does not reach the app's key window while the app is in the
+        // background. The close button works in every state we tested.
+        let pid = req["pid"] as? Int ?? 0
+        let name = req["name"] as? String ?? ""
+        let ax = appElement(Int32(pid))
+
+        func documentsNow() -> [String] { windowMenuDocuments(ax) ?? [] }
+        let before = documentsNow()
+        guard !before.isEmpty else { return ["ok": false, "error": "the app has no open documents"] }
+        let target = name.isEmpty ? (before.first ?? "") : name
+        guard before.contains(target) else {
+            return ["ok": false, "error": "no open document named " + target, "available": before]
+        }
+
+        // A backgrounded Cocoa app usually exposes only its main window, so
+        // bring the target document forward through the Window menu first.
+        // That is a document-level focus change inside the app, never an
+        // app-level activation, so the person's frontmost app does not move.
+        if (axAttr(ax, "AXMainWindow").map { axStr($0 as! AXUIElement, "AXTitle") } ?? "") != target {
+            _ = pressWindowMenuItem(ax, target)
+            usleep(250_000)
+        }
+
+        var windows: [AXUIElement] = []
+        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] { windows = ws }
+        if let mw = axAttr(ax, "AXMainWindow") { windows.append(mw as! AXUIElement) }
+        guard let w = windows.first(where: { axStr($0, "AXTitle") == target }) else {
+            return ["ok": false, "error": "no window titled " + target]
+        }
+        guard let closeButton = axAttr(w, "AXCloseButton") else {
+            return ["ok": false, "error": "the window has no close button"]
+        }
+        let rc = AXUIElementPerformAction(closeButton as! AXUIElement, "AXPress" as CFString).rawValue
+        usleep(400_000)
+
+        if let sheets = axAttr(w, "AXSheets") as? [AXUIElement], !sheets.isEmpty {
+            return [
+                "ok": false,
+                "error": "the document has unsaved changes and is asking whether to save; answer it or leave it",
+                "sheet": axStr(sheets[0], "AXTitle"),
+            ]
+        }
+
+        let after = documentsNow()
+        if !after.contains(target) {
+            return ["ok": true, "rc": Int(rc), "closed": target]
+        }
+        return ["ok": false, "error": "the close button was pressed but the document is still open"]
+
+    case "documents":
+        // The open documents of an app.
+        //
+        // AXWindows is often empty for a backgrounded Cocoa app (TextEdit
+        // reports 0 while AXMainWindow reports the front document), so the
+        // Window menu is the reliable enumeration: every open document is a
+        // menu item in it.
+        let pid = req["pid"] as? Int ?? 0
+        let ax = appElement(Int32(pid))
+        var names: [String] = []
+        if let ws = axAttr(ax, "AXWindows") as? [AXUIElement] {
+            for w in ws {
+                let sub = axStr(w, "AXSubrole")
+                guard axStr(w, "AXRole") == "AXWindow", sub != "AXSystemDialog" else { continue }
+                let t = axStr(w, "AXTitle")
+                if !t.isEmpty && !t.contains("Accessory") { names.append(t) }
+            }
+        }
+        if names.isEmpty, let mw = axAttr(ax, "AXMainWindow") {
+            let t = axStr(mw as! AXUIElement, "AXTitle")
+            if !t.isEmpty { names.append(t) }
+        }
+        if let menuDocs = windowMenuDocuments(ax) {
+            for d in menuDocs where !names.contains(d) { names.append(d) }
+        }
+        return ["ok": true, "documents": names]
 
     case "file_dialog":
         return driveFileDialog(req)

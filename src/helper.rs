@@ -282,6 +282,28 @@ pub fn file_dialog(h: &Helper, pid: i32, req: serde_json::Value) -> Result<serde
     h.ok(body)
 }
 
+/// Open a document in an app without a file panel and without focus change.
+pub fn open_file(h: &Helper, app: &str, path: &str) -> Result<(), String> {
+    h.ok(json!({"cmd": "open_file", "app": app, "path": path})).map(|_| ())
+}
+
+/// Close one document of the bound app, leaving the app running.
+pub fn close_file(h: &Helper, pid: i32, name: &str) -> Result<String, String> {
+    let v = h.ok(json!({"cmd": "close_file", "pid": pid, "name": name}))?;
+    Ok(v.get("closed").and_then(|x| x.as_str()).unwrap_or("").to_string())
+}
+
+/// The documents the app has open.
+pub fn documents(h: &Helper, pid: i32) -> Vec<String> {
+    h.ok(json!({"cmd": "documents", "pid": pid}))
+        .ok()
+        .and_then(|v| v.get("documents").and_then(|d| d.as_array()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|d| d.as_str().map(String::from))
+        .collect()
+}
+
 pub fn permissions(h: &Helper) -> Permissions {
     match h.call(json!({"cmd": "perms"})) {
         Ok(v) => Permissions {

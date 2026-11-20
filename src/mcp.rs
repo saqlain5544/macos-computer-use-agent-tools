@@ -216,6 +216,27 @@ fn tool_specs() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "open_file",
+            description: "Open a document in the bound app without showing a file panel and without stealing focus. This is how you open a file without disturbing the person.",
+            schema: || obj(
+                json!({
+                    "path": s("the file to open"),
+                    "app": s("which app opens it; defaults to the bound app")
+                }),
+                vec!["path"],
+            ),
+        },
+        ToolSpec {
+            name: "close_file",
+            description: "Close one document of the bound app, leaving the app running.",
+            schema: || obj(json!({ "name": s("the document; defaults to the frontmost one") }), vec![]),
+        },
+        ToolSpec {
+            name: "documents",
+            description: "The documents the bound app has open.",
+            schema: || obj(json!({}), vec![]),
+        },
+        ToolSpec {
             name: "set_mode",
             description: "Switch between background (default; the person is never disturbed) and focused (the target is raised for one action, then restored).",
             schema: || obj(json!({ "mode": s("\"background\" or \"focused\"") }), vec!["mode"]),

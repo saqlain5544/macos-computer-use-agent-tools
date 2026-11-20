@@ -569,7 +569,7 @@ const TOOLS: &[&str] = &[
     "hotkey", "set_value", "set_caret", "click_label", "press_button", "get_text", "set_mode",
     "pause", "resume", "stop_driver", "start_driver", "status", "show_dashboard",
     "clipboard_read", "clipboard_write", "screenshot", "record", "log_friction",
-    "friction_log", "workspace",
+    "friction_log", "workspace", "open_file", "close_file", "documents",
 ];
 
 /// Run one tool. Public so the MCP surface can reuse the exact same behaviour
@@ -798,6 +798,63 @@ fn run_tool(tool: &str, obj: &Map<String, Value>, shared: &Handle, helper: &Help
                 }
                 Err(e) => ActionReport::err(e),
             };
+        }
+        "open_file" => {
+            // Open a document in the bound app: no file panel, no focus change.
+            let t = match session::current_target(shared) {
+                Ok(t) => t,
+                Err(e) => return ActionReport::err(e),
+            };
+            let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.trim().is_empty() {
+                return ActionReport::err("open_file needs a \"path\"");
+            }
+            let app = obj
+                .get("app")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t.app_name.clone());
+            return match helper::open_file(helper, &app, path) {
+                Ok(()) => {
+                    let mut r = ActionReport::ok(format!("opened {} in {} (no panel, no focus change)", path, app));
+                    r.payload = Some(json!({"path": path, "app": app}));
+                    r
+                }
+                Err(e) => ActionReport::err(e),
+            };
+        }
+        "close_file" => {
+            let t = match session::current_target(shared) {
+                Ok(t) => t,
+                Err(e) => return ActionReport::err(e),
+            };
+            let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let target = if name.trim().is_empty() {
+                helper::documents(helper, t.pid).into_iter().next().unwrap_or_default()
+            } else {
+                name.to_string()
+            };
+            if target.trim().is_empty() {
+                return ActionReport::err("no document to close");
+            }
+            return match helper::close_file(helper, t.pid, &target) {
+                Ok(closed) => {
+                    let mut r = ActionReport::ok(format!("closed {}", closed));
+                    r.payload = Some(json!({"closed": closed}));
+                    r
+                }
+                Err(e) => ActionReport::err(e),
+            };
+        }
+        "documents" => {
+            let t = match session::current_target(shared) {
+                Ok(t) => t,
+                Err(e) => return ActionReport::err(e),
+            };
+            let docs = helper::documents(helper, t.pid);
+            let mut r = ActionReport::ok(format!("{} open document(s)", docs.len()));
+            r.payload = Some(json!({"documents": docs}));
+            return r;
         }
         "log_friction" => {
             let agent = agent_id(obj);

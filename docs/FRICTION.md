@@ -45,6 +45,12 @@ route around them, and so nobody re-investigates them.
 
 ### `NSOpenPanel` / `NSSavePanel` will not commit
 
+> **Resolved for the common case.** Use `open_file` to open a document: it
+> runs `open -g`, shows no panel, and does not move the person's focus.
+> `close_file` closes a document through its window's close button and
+> verifies it. This entry remains for the case where an app itself insists on
+> a save/open sheet.
+
 **What happens.** The panel opens (and takes focus — a file panel is a real
 window). Its filename field can be read and written. Pressing **Open**,
 pressing **Cancel**, `AXConfirm` on the field, a posted Return key, and a real
