@@ -343,6 +343,34 @@ enum Session {
         return updated
     }
 
+    /// Re-resolve to a window of the bound app other than one that is known bad.
+    ///
+    /// A closed window can linger in the window server's list for a moment, so a
+    /// plain rebind happily hands back the same dead id and a capture fails
+    /// again. Excluding the window that just failed is what breaks that loop.
+    static func rebindExcluding(_ shared: Shared, _ helper: Helper, badWindowId: UInt32) -> Target? {
+        guard let current = shared.target else { return nil }
+        let pid: Int32
+        if let resolved = try? helper.resolve(current.identity) {
+            pid = resolved.pid
+        } else if let resolved = try? helper.resolve(current.appName) {
+            pid = resolved.pid
+        } else {
+            return nil
+        }
+        let candidates = helper.windowsList()
+            .filter { $0.pid == pid && isUsableWindow($0) && $0.windowId != badWindowId }
+        guard let win = candidates.max(by: { ($0.bounds.w * $0.bounds.h) < ($1.bounds.w * $1.bounds.h) }) else {
+            return nil
+        }
+        let updated = Target(pid: pid, identity: current.identity, appName: win.owner,
+                             windowId: win.windowId, windowTitle: win.title,
+                             bounds: win.bounds, owner: current.owner)
+        shared.target = updated
+        shared.boundsRefreshedAt = 0
+        return updated
+    }
+
     /// The bound target, refreshed and verified live.
     static func liveTarget(_ shared: Shared, _ helper: Helper, force: Bool) throws -> Target {
         var target = try currentTarget(shared)
@@ -402,10 +430,23 @@ enum Session {
         try? helper.raiseWindow(pid: target.pid)
         let out = body()
         let changed = cameForward && beforePid != 0 && beforePid != target.pid
+
+        // Put the person's app back, and verify rather than assume.
+        //
+        // Activation is a request, not a command: a busy app, a freshly raised
+        // window, or a modal sheet can swallow the first one. The driver's whole
+        // promise is that the person ends up where they started, so this retries
+        // and checks the frontmost app instead of trusting the call's return.
         var restored = false
         if changed {
-            restored = (try? helper.activate(pid: beforePid)) != nil
-                || waitForFrontmost(helper, beforePid, ms: 400)
+            for attempt in 0..<3 {
+                if (try? helper.activate(pid: beforePid)) != nil,
+                   waitForFrontmost(helper, beforePid, ms: 300) {
+                    restored = true
+                    break
+                }
+                if attempt < 2 { usleep(120_000) }
+            }
         }
         return (out, changed, restored)
     }

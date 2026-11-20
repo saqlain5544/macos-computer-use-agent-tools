@@ -114,7 +114,9 @@ let screenshotPath = flagValue("--screenshot")
 let screenshotMaxEdge = flagValue("--screenshot-max-edge").flatMap { Int($0) }
 let isBridge = args.contains("--mcp-stdio")
 let isHeadless = args.contains("--headless")
-let isViewer = args.contains("--viewer")
+// A screenshot is a viewer that leaves: it attaches to the running daemon,
+// draws one frame, captures it, and exits.
+let isViewer = args.contains("--viewer") || screenshotPath != nil
 let wantsShow = args.contains("--show")
 
 // A worker is spawned by the daemon with the same binary. It must never touch
@@ -131,12 +133,25 @@ if isBridge {
 
 // A viewer never owns the device: it is a window onto whatever daemon is running.
 if isViewer {
-    if let existing = DashboardViewer.runningInstance(), existing.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+    // A screenshot needs a fresh window, so it does not reuse an open one.
+    if screenshotPath == nil,
+       let existing = DashboardViewer.runningInstance(),
+       existing.processIdentifier != ProcessInfo.processInfo.processIdentifier {
         // A window is already open; raising it is the whole job.
         existing.activate(options: [.activateAllWindows])
         exit(0)
     }
-    guard let port = MCP.daemonPort() else {
+    var daemonPort = MCP.daemonPort()
+    if daemonPort == nil {
+        // Nothing is running yet: start one, then view it. A screenshot of a
+        // dashboard with no daemon behind it would be a mock-up.
+        MCP.spawnDaemon()
+        for _ in 0..<40 {
+            usleep(250_000)
+            if let p = MCP.daemonPort() { daemonPort = p; break }
+        }
+    }
+    guard let port = daemonPort else {
         FileHandle.standardError.write(Data("quiet-driver: no daemon is running\n".utf8))
         exit(4)
     }
@@ -155,6 +170,14 @@ if isViewer {
     DashboardViewer.register()
     NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { _ in
         DashboardViewer.unregister()
+    }
+    if let path = screenshotPath {
+        // One frame has to be laid out before the view can draw itself.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            captureOwnWindow(window, to: path, maxEdge: screenshotMaxEdge)
+            DashboardViewer.unregister()
+            exit(0)
+        }
     }
     app.run()
     DashboardViewer.unregister()
@@ -214,15 +237,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         FileHandle.standardError.write(Data("quiet-driver: dashboard on http://127.0.0.1:\(port)\n".utf8))
 
-        if let path = screenshotPath {
-            // First paint needs a frame; capture after it, then leave.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                captureOwnWindow(to: path, maxEdge: screenshotMaxEdge)
-                driver.stop()
-                NSApp.terminate(nil)
-                exit(0)
-            }
-        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -231,29 +245,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// Capture the dashboard window by id, then scale so the long edge matches the
 /// documented ceiling.
-func captureOwnWindow(to path: String, maxEdge: Int?) {
-    let me = ProcessInfo.processInfo.processIdentifier
-    let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-    for w in info {
-        guard (w[kCGWindowOwnerPID as String] as? Int32) == me,
-              (w[kCGWindowLayer as String] as? Int) == 0,
-              let number = w[kCGWindowNumber as String] as? Int else { continue }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        p.arguments = ["-x", "-o", "-l", String(number), path]
-        try? p.run()
-        p.waitUntilExit()
-        if let edge = maxEdge, edge > 0 {
-            let s = Process()
-            s.executableURL = URL(fileURLWithPath: "/usr/bin/sips")
-            s.arguments = ["-Z", String(edge), path]
-            try? s.run()
-            s.waitUntilExit()
-        }
-        FileHandle.standardError.write(Data("quiet-driver: wrote \(path)\n".utf8))
+/// Write the dashboard window to a PNG by drawing its own content.
+///
+/// Going through `screencapture` needs the window to be on screen, composited,
+/// and front — which is exactly what a background dashboard is not. Asking the
+/// view to draw itself needs none of that and renders the same pixels.
+func captureOwnWindow(_ window: NSWindow, to path: String, maxEdge: Int?) {
+    guard let view = window.contentView else { return }
+    let bounds = view.bounds
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else { return }
+    view.cacheDisplay(in: bounds, to: rep)
+    guard let png = rep.representation(using: .png, properties: [:]) else { return }
+    do {
+        try png.write(to: URL(fileURLWithPath: path))
+    } catch {
+        FileHandle.standardError.write(Data("quiet-driver: could not write \(path): \(error)\n".utf8))
         return
     }
-    FileHandle.standardError.write(Data("quiet-driver: could not find the dashboard window\n".utf8))
+    if let edge = maxEdge, edge > 0 {
+        let s = Process()
+        s.executableURL = URL(fileURLWithPath: "/usr/bin/sips")
+        s.arguments = ["-Z", String(edge), path]
+        try? s.run()
+        s.waitUntilExit()
+    }
+    FileHandle.standardError.write(Data("quiet-driver: wrote \(path) (\(png.count) bytes)\n".utf8))
 }
 
 if isHeadless || !wantsShow && ProcessInfo.processInfo.environment["QD_HEADLESS"] == "1" {

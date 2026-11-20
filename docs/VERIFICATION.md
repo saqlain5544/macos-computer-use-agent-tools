@@ -300,7 +300,25 @@ contract is what had to survive.
 The daemon is 4 MB heavier because the Swift runtime is in-process; the workers,
 which hold the accessibility connections, cost the same.
 
-## 16. What is *not* verified
+## 16. What the port had to fix
+
+Removing Rust was not a mechanical translation. The eleven things it exposed:
+
+| Symptom | Cause |
+|---|---|
+| daemon deadlocked on the second worker call | `stop()` re-locked a non-recursive `NSLock` already held by `call()` |
+| every window parsed as 0x0 | the worker sends rectangles flat, not nested under `bounds` |
+| `press_key` silently did nothing | the worker protocol names the key field `key`; the caller sent `text` |
+| binding an app with no window failed | that is the normal state after launch, and `open_file` is how it gets one |
+| dashboard unreachable after its port file was deleted | the daemon never republished; it now heals on the probe tick |
+| `show_dashboard` piled up windows | it spawned a viewer per call; there is one, and asking again raises it |
+| harness measured text tools on the wrong app | it opened a document before binding, so the file went to the previous app |
+| harness reported Chrome redrawing as a focus move | the invariant now counts app activation and the target climbing to the top |
+| focused mode sometimes left focus moved | activation is a request; restore now retries and verifies the frontmost app |
+| a capture could retry the same dead window forever | rebind handed back the ghost; the retry now excludes the id that failed |
+| `click_label("+")` on Calculator | the key is labelled "Add" — a small symbol alias table fixes it, and real labels always win |
+
+## 17. What is *not* verified
 
 Honesty about the edges:
 

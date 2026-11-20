@@ -256,16 +256,16 @@ enum Tools {
             // cannot be captured; that ghost clears within a frame or two, so
             // re-resolve and retry rather than reporting the capture tool's
             // error, which tells an agent nothing.
-            var attempt = Result { try helper.screenshot(windowId: t.windowId, path: path) }
+            var captured = t.windowId
+            var attempt = Result { try helper.screenshot(windowId: captured, path: path) }
             for _ in 0..<3 {
                 if case .success = attempt { break }
                 usleep(150_000)
-                do {
-                    let fresh = try Session.rebind(helper, shared)
-                    attempt = Result { try helper.screenshot(windowId: fresh.windowId, path: path) }
-                } catch {
-                    return ActionReport.err(noWindowReason(helper, t, "\(error)"))
+                guard let fresh = Session.rebindExcluding(shared, helper, badWindowId: captured) else {
+                    return ActionReport.err(noWindowReason(helper, t, "no window to capture"))
                 }
+                captured = fresh.windowId
+                attempt = Result { try helper.screenshot(windowId: captured, path: path) }
             }
             switch attempt {
             case .success(let shot):
@@ -287,14 +287,7 @@ enum Tools {
                 path = try Workspace.resolveOutput(agent, "recording", "mov", requested: asString(obj["path"]))
             } catch { return ActionReport.err("\(error)") }
             let seconds = min(60.0, max(0.5, num(obj, "seconds") ?? 3.0))
-            var attempt = Result { try helper.record(pid: t.pid, seconds: seconds, path: path) }
-            for _ in 0..<2 {
-                if case .success = attempt { break }
-                usleep(150_000)
-                do { _ = try Session.rebind(helper, shared) }
-                catch { return ActionReport.err(noWindowReason(helper, t, "\(error)")) }
-                attempt = Result { try helper.record(pid: t.pid, seconds: seconds, path: path) }
-            }
+            let attempt = Result { try helper.record(pid: t.pid, seconds: seconds, path: path) }
             switch attempt {
             case .success(let v):
                 let frames = asInt(v["frames"]) ?? 0

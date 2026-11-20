@@ -51,6 +51,25 @@ func axStr(_ el: AXUIElement, _ name: String) -> String {
 var controlCache: [Int32: (controls: [(AXUIElement, String)], frames: [CGRect], at: Date)] = [:]
 let controlCacheTTL: TimeInterval = 1.0
 
+/// Symbols an agent is likely to ask for, and the words apps actually use for
+/// them. Calculator labels its plus key "Add", so `click_label("+")` failed with
+/// a helpful-but-useless list of controls. Only consulted after exact,
+/// case-insensitive and word-subset matching all miss, so it can never override
+/// a real label.
+let symbolAliases: [String: [String]] = [
+    "+": ["add", "plus"],
+    "-": ["subtract", "minus"],
+    "−": ["subtract", "minus"],
+    "*": ["multiply", "times"],
+    "×": ["multiply", "times"],
+    "/": ["divide"],
+    "÷": ["divide"],
+    "=": ["equals"],
+    "±": ["change sign", "negate", "sign"],
+    "%": ["percent", "percentage"],
+    ".": ["decimal point", "point", "decimal"],
+]
+
 /// Match a requested label against a control list.
 ///
 /// Exact first, then case-insensitive, then a unique control whose words are a
@@ -69,6 +88,13 @@ func matchControl(_ controls: [(AXUIElement, String)], _ label: String) -> (elem
         return !w.isEmpty && w.isSubset(of: wanted)
     }
     if subset.count == 1 { return (subset[0].element.0, subset[0].element.1, subset[0].offset) }
+    if let aliases = symbolAliases[label.trimmingCharacters(in: .whitespaces)] {
+        for alias in aliases {
+            if let i = controls.firstIndex(where: { $0.1.lowercased() == alias }) {
+                return (controls[i].0, controls[i].1, i)
+            }
+        }
+    }
     return nil
 }
 

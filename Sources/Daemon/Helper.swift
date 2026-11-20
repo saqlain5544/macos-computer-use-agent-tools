@@ -129,6 +129,13 @@ final class Helper {
         stopLocked()
     }
 
+    /// Is the worker's stdout readable within `timeoutMs`?
+    private func pollReadable(_ handle: FileHandle, timeoutMs: Int32) -> Bool {
+        var pfd = pollfd(fd: handle.fileDescriptor, events: Int16(POLLIN), revents: 0)
+        let rc = poll(&pfd, 1, timeoutMs)
+        return rc > 0 && (pfd.revents & Int16(POLLIN)) != 0
+    }
+
     private func stopLocked() {
         if let c = child {
             try? toWorker?.close()
@@ -161,7 +168,7 @@ final class Helper {
             child = nil
             throw HelperError.failed("worker write failed: \(error.localizedDescription)")
         }
-        guard let reply = readLine(from: output) else {
+        guard let reply = try readLine(from: output) else {
             child = nil
             throw HelperError.failed("worker closed the pipe")
         }
@@ -171,13 +178,30 @@ final class Helper {
         return obj
     }
 
+    /// How long a single worker call may take before the worker is considered
+    /// wedged. A real accessibility call on a large tree is under a second;
+    /// fifteen is far past "slow" and well before "the daemon looks hung".
+    static let callTimeoutMs = 15_000
+
     /// Read one newline-terminated message, keeping any surplus in the buffer.
-    private func readLine(from handle: FileHandle) -> String? {
+    ///
+    /// `availableData` cannot time out, so the descriptor is polled: a worker
+    /// that never answers — a wedged accessibility connection, a half-written
+    /// pipe — would otherwise block the caller forever, and with it the daemon.
+    private func readLine(from handle: FileHandle) throws -> String? {
+        let deadline = Date().addingTimeInterval(Double(Helper.callTimeoutMs) / 1000.0)
         while true {
             if let nl = buffer.firstIndex(of: 0x0A) {
                 let lineData = buffer[buffer.startIndex..<nl]
                 buffer.removeSubrange(buffer.startIndex...nl)
                 return String(data: lineData, encoding: .utf8)
+            }
+            guard pollReadable(handle, timeoutMs: 200) else {
+                if Date() > deadline {
+                    stopLocked()
+                    throw HelperError.failed("worker did not answer within \(Helper.callTimeoutMs) ms; it was restarted")
+                }
+                continue
             }
             let chunk = handle.availableData
             if chunk.isEmpty { return nil }

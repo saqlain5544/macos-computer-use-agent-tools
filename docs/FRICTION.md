@@ -149,6 +149,18 @@ The acceptance sweep marks focus and document checks `SKIP` instead of `FAIL`.
 **Route around it.** Nothing to fix: report it to the agent so it can wait, or
 keep doing the AX work that does not need a key window.
 
+### Calculator's plus key is called "Add"
+
+**What happens.** `click_label("+")` finds nothing. Calculator's buttons are
+labelled with words — Add, Subtract, Multiply, Divide, Equals — while what a
+person sees is +, −, ×, ÷, =. An agent that describes the button the way a
+person would could not press it.
+
+**What the driver does now.** A small alias table, consulted only after exact,
+case-insensitive and word-subset matching have all missed: `+` finds "Add", `=`
+finds "Equals", `×` finds "Multiply", and so on. A real label always wins, so
+the table can never override what the app itself says.
+
 ## Logged by agents
 
 These came from `log_friction` during development, verbatim. The live
