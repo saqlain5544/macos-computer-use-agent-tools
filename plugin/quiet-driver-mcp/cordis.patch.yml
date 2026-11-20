@@ -1,0 +1,11 @@
+- insert:
+    - id: quiet-driver-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: quietdriver
+        transport: stdio
+        command: /Applications/Quiet Driver.app/Contents/MacOS/agent-driver
+        args: ['--mcp-stdio']
+        failOnStartupError: false
+        reconnect:
+          enabled: true

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Quiet Driver",
+    "description": "Drives real macOS apps in the background: the agent binds to one app and works in it without moving your pointer or stealing focus.",
+    "detail": "docs/DETAIL.md"
+  }
+}

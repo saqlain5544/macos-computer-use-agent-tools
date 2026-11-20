@@ -1,0 +1,9 @@
+# build output
+/target/
+/.build/
+/Quiet Driver.app/
+
+# local scratch
+.DS_Store
+*.log
+/shots/
